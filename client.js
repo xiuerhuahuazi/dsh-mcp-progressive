@@ -21,6 +21,9 @@ window.__ModuleLoader__.load({
     const TOGGLE_URL = '/dsh-mcp-hub/toggle'
     const RESTART_URL = '/dsh-mcp-hub/restart'
     const POLL_MS = 2500
+    // A request that never settles must not wedge the panel: every request is
+    // aborted at this deadline so the next poll can try again.
+    const REQUEST_TIMEOUT_MS = 10_000
     const NS = 'dshMcpServers'
 
     const DICT = {
@@ -33,6 +36,7 @@ window.__ModuleLoader__.load({
         empty: 'No MCP servers are configured for this profile.',
         loading: 'Loading MCP servers…',
         failure: 'Could not load MCP servers',
+        timeout: 'The request timed out',
         retry: 'Retry',
         restart: 'Restart',
         start: 'Start',
@@ -40,10 +44,16 @@ window.__ModuleLoader__.load({
         starting: 'Starting…',
         stopping: 'Stopping…',
         restarting: 'Restarting…',
+        switchLabel: 'MCP server availability',
+        'action.done': 'Done',
+        'action.restartRequired': 'Saved — restart DeepSeek Harness to apply',
+        'action.overridden': 'Saved, but a higher-priority layer overrides it',
+        'action.failed': 'The change was not applied',
         'status.running': 'running',
         'status.stopped': 'stopped',
         'status.idle': 'connected, no tools',
         'status.starting': 'starting',
+        'status.stopping': 'stopping',
         'status.error': 'error',
         'status.unknown': 'unknown',
       },
@@ -56,6 +66,7 @@ window.__ModuleLoader__.load({
         empty: '当前 profile 没有配置 MCP 服务器。',
         loading: '正在加载 MCP 服务器…',
         failure: '无法加载 MCP 服务器',
+        timeout: '请求超时',
         retry: '重试',
         restart: '重启',
         start: '启动',
@@ -63,10 +74,16 @@ window.__ModuleLoader__.load({
         starting: '启动中…',
         stopping: '停止中…',
         restarting: '重启中…',
+        switchLabel: 'MCP 服务器可用性',
+        'action.done': '已完成',
+        'action.restartRequired': '已保存，需重启 DeepSeek Harness 后生效',
+        'action.overridden': '已保存，但被更高优先级的层覆盖',
+        'action.failed': '修改未生效',
         'status.running': '运行中',
         'status.stopped': '已停止',
         'status.idle': '已连接（无工具）',
         'status.starting': '启动中',
+        'status.stopping': '停止中',
         'status.error': '错误',
         'status.unknown': '未知',
       },
@@ -87,14 +104,15 @@ window.__ModuleLoader__.load({
 .dsh-mcp-title-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
 .dsh-mcp-card-title{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:14px;font-weight:500;line-height:20px}
 .dsh-mcp-card[data-state=stopped] .dsh-mcp-card-title{color:var(--dsw-alias-label-secondary)}
-.dsh-mcp-tag{display:inline-flex;align-items:center;flex:none;height:18px;padding:0 7px;border-radius:999px;corner-shape:round;font-size:10px;font-weight:500;line-height:1;white-space:nowrap}
+.dsh-mcp-tag{display:inline-flex;align-items:center;flex:none;height:20px;padding:0 8px;border-radius:999px;corner-shape:round;font-size:11px;font-weight:500;line-height:1;white-space:nowrap}
 .dsh-mcp-tag[data-tone=success]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent);color:var(--dsw-alias-state-success-primary)}
 .dsh-mcp-tag[data-tone=warning]{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);color:var(--dsw-alias-state-warn-primary)}
 .dsh-mcp-tag[data-tone=danger]{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent);color:var(--dsw-alias-state-error-primary)}
 .dsh-mcp-tag[data-tone=neutral]{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary)}
 .dsh-mcp-card-desc{display:-webkit-box;overflow:hidden;-webkit-line-clamp:1;-webkit-box-orient:vertical;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:18px}
 .dsh-mcp-card-end{position:relative;z-index:1;display:inline-flex;flex:none;align-items:center;gap:8px}
-.dsh-mcp-icon-btn{box-sizing:border-box;display:inline-flex;flex:none;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;transition:background .12s ease,color .12s ease}
+.dsh-mcp-icon-btn{position:relative;box-sizing:border-box;display:inline-flex;flex:none;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;transition:background .12s ease,color .12s ease}
+.dsh-mcp-icon-btn::after{content:'';position:absolute;inset:-2px;border-radius:inherit}
 .dsh-mcp-icon-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .dsh-mcp-icon-btn:active:not(:disabled){background:var(--dsw-alias-interactive-bg-active)}
 .dsh-mcp-icon-btn:disabled{cursor:not-allowed;opacity:.4}
@@ -107,6 +125,9 @@ window.__ModuleLoader__.load({
 .dsh-mcp-empty{margin:0;padding:4px 0;color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xs-13)}
 .dsh-mcp-failure{display:flex;align-items:flex-start;gap:12px;margin:0;padding:10px 12px;border:.5px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 35%,transparent);border-radius:var(--dsw-radius-md);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent);color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12)}
 .dsh-mcp-failure-text{flex:1;min-width:0;overflow-wrap:anywhere}
+.dsh-mcp-action{margin:0;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12);overflow-wrap:anywhere}
+.dsh-mcp-action:not(:empty){padding:10px 12px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform)}
+.dsh-mcp-action[data-tone=error]:not(:empty){border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 35%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent);color:var(--dsw-alias-label-primary)}
 .dsh-mcp-btn{box-sizing:border-box;display:inline-flex;flex:none;align-items:center;justify-content:center;gap:4px;height:28px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);cursor:pointer}
 .dsh-mcp-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .dsh-mcp-btn:active:not(:disabled){background:var(--dsw-alias-interactive-bg-active)}
@@ -123,7 +144,9 @@ window.__ModuleLoader__.load({
       const language = (() => {
         try {
           const snapshot = ctx.locale.getLocale()
-          const id = snapshot && (snapshot.id || snapshot.locale || snapshot.current)
+          // The platform snapshot names the resolved language `active`; the
+          // other fields stay as fallbacks for older hosts and test doubles.
+          const id = snapshot && (snapshot.active || snapshot.id || snapshot.locale || snapshot.current)
           if (typeof id === 'string' && id) return id
         } catch {
           // Fall through to the browser language.
@@ -151,24 +174,109 @@ window.__ModuleLoader__.load({
         h('path', { d: 'M13 3v3.5H9.5', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round' }))
     }
 
-    async function requestJson(url, init) {
-      const response = await fetch(url, Object.assign({ cache: 'no-store' }, init))
-      let body = null
+    /**
+     * Fetch JSON, with an abort deadline and an optional tracking set so an
+     * unmount can abort everything still in flight.
+     *
+     * Both globals are feature-detected: the real browser always has them, and
+     * the panel must still mount in a minimal test double that does not.
+     *
+     * @param {string} url route to call
+     * @param {object} [init] fetch init
+     * @param {{track?: Set<AbortController>, timeoutMs?: number}} [options]
+     * @returns {Promise<object>} the parsed `{ok: true, …}` body
+     */
+    async function requestJson(url, init, options = {}) {
+      const controller = typeof AbortController === 'function' ? new AbortController() : null
+      const tracked = controller !== null && options.track instanceof Set ? options.track : null
+      const timeoutMs = typeof options.timeoutMs === 'number' ? options.timeoutMs : REQUEST_TIMEOUT_MS
+      if (tracked !== null) tracked.add(controller)
+      const timer = controller !== null && typeof setTimeout === 'function'
+        ? setTimeout(() => controller.abort(), timeoutMs)
+        : null
       try {
-        body = await response.json()
-      } catch {
-        body = null
+        const fetchInit = Object.assign({ cache: 'no-store' }, init)
+        if (controller !== null) fetchInit.signal = controller.signal
+        const response = await fetch(url, fetchInit)
+        let body = null
+        try {
+          body = await response.json()
+        } catch {
+          body = null
+        }
+        if (!response.ok || body === null || body.ok !== true) {
+          throw new Error(body && body.error ? body.error : 'HTTP ' + response.status)
+        }
+        return body
+      } catch (error) {
+        // Aborted means the deadline fired or the panel unmounted. Callers check
+        // `alive` before rendering, so flagging it as a timeout is enough here.
+        if (controller !== null && controller.signal.aborted) {
+          const timeout = new Error('request timed out')
+          timeout.timeout = true
+          throw timeout
+        }
+        throw error
+      } finally {
+        if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer)
+        if (tracked !== null) tracked.delete(controller)
       }
-      if (!response.ok || body === null || body.ok !== true) {
-        throw new Error(body && body.error ? body.error : 'HTTP ' + response.status)
-      }
-      return body
+    }
+
+    /** Human-readable error text, translated for the one error we produce ourselves. */
+    function errorText(error, t) {
+      if (error !== null && typeof error === 'object' && error.timeout === true) return t('timeout')
+      return error && error.message ? error.message : String(error)
+    }
+
+    /** Status-following state of one pending action, used for the tag while busy. */
+    const BUSY_STATE = { start: 'starting', stop: 'stopping', restart: 'restarting' }
+
+    /** Row address: the management half resolves `entryId` exactly, so prefer it. */
+    function addressOf(server) {
+      if (typeof server.entryId === 'string' && server.entryId !== '') return server.entryId
+      if (typeof server.id === 'string' && server.id !== '') return server.id
+      return String(server.serverName)
+    }
+
+    /** Wire body of one action; `entryId` first, id/name only when it is missing. */
+    function addressBody(server) {
+      if (typeof server.entryId === 'string' && server.entryId !== '') return { entryId: server.entryId }
+      if (typeof server.id === 'string' && server.id !== '') return { id: server.id }
+      return { server: server.serverName }
+    }
+
+    function serverLabel(server) {
+      return typeof server.serverName === 'string' && server.serverName !== '' ? server.serverName : addressOf(server)
+    }
+
+    /** The manager's `ChangeResult.application`, wherever the route puts it. */
+    function applicationOf(body) {
+      const result = body !== null && typeof body === 'object' ? body.result : null
+      if (result !== null && typeof result === 'object' && typeof result.application === 'string') return result.application
+      if (body !== null && typeof body === 'object' && typeof body.application === 'string') return body.application
+      return 'applied'
+    }
+
+    /**
+     * Turn one action response into the informational line under the list.
+     * `restart-required` / `overridden` are reported, never shown as success.
+     */
+    function outcomeOf(body, server, t) {
+      const application = applicationOf(body)
+      const name = serverLabel(server)
+      if (application === 'restart-required') return { tone: 'info', text: name + ': ' + t('action.restartRequired') }
+      if (application === 'overridden') return { tone: 'info', text: name + ': ' + t('action.overridden') }
+      if (application === 'failed' || application === 'cancelled') return { tone: 'error', text: name + ': ' + t('action.failed') }
+      return { tone: 'info', text: name + ': ' + t('action.done') }
     }
 
     function statusTone(state) {
       if (state === 'running') return 'success'
       if (state === 'error') return 'danger'
-      if (state === 'starting') return 'warning'
+      // 'stopping' keeps its own neutral tone: a shutdown in progress is not a
+      // start and must not borrow the starting warning colour.
+      if (state === 'starting' || state === 'restarting') return 'warning'
       return 'neutral'
     }
 
@@ -176,23 +284,33 @@ window.__ModuleLoader__.load({
       return function McpServersPanel(props) {
         const t = props !== null && props !== undefined && typeof props.t === 'function' ? props.t : fallbackT
         const [state, setState] = useState(null)
-        const [failure, setFailure] = useState(null)
-        const [pending, setPending] = useState({})
+        const [loadError, setLoadError] = useState(null)
+        const [outcome, setOutcome] = useState(null)
+        const [pending, setPending] = useState(() => new Map())
         const alive = useRef(true)
-        const inFlight = useRef(false)
+        // Every request gets a monotonic generation. Snapshots only move forward,
+        // and a GET that started before the newest action (or before the newest
+        // applied snapshot) is discarded instead of overwriting a newer result.
+        const sequence = useRef(0)
+        const appliedSequence = useRef(0)
+        const actionSequence = useRef(0)
+        // Requests still in flight; unmount aborts them so nothing lands late.
+        const controllers = useRef(new Set())
+        const tRef = useRef(t)
+        tRef.current = t
 
         const load = useCallback(async () => {
-          if (inFlight.current) return
-          inFlight.current = true
+          const seq = (sequence.current += 1)
           try {
-            const body = await requestJson(STATE_URL)
+            const body = await requestJson(STATE_URL, undefined, { track: controllers.current })
             if (!alive.current) return
+            if (seq <= appliedSequence.current || seq <= actionSequence.current) return
+            appliedSequence.current = seq
             setState(body)
-            setFailure(null)
+            setLoadError(null)
           } catch (error) {
-            if (alive.current) setFailure(error && error.message ? error.message : String(error))
-          } finally {
-            inFlight.current = false
+            if (!alive.current || seq <= appliedSequence.current || seq <= actionSequence.current) return
+            setLoadError(errorText(error, tRef.current))
           }
         }, [])
 
@@ -203,62 +321,81 @@ window.__ModuleLoader__.load({
           return () => {
             alive.current = false
             clearInterval(timer)
+            for (const controller of controllers.current) controller.abort()
+            controllers.current.clear()
           }
         }, [load])
 
         const act = useCallback(async (server, action) => {
-          const key = server.id || server.serverName
-          setPending((previous) => Object.assign({}, previous, { [key]: action }))
+          const key = addressOf(server)
+          const seq = (sequence.current += 1)
+          // A new action clears the previous outcome; a later poll never does.
+          actionSequence.current = seq
+          setOutcome(null)
+          setPending((previous) => {
+            const next = new Map(previous)
+            next.set(key, action)
+            return next
+          })
           try {
             const body = action === 'restart'
               ? await requestJson(RESTART_URL, {
                   method: 'POST',
                   headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ server: key }),
-                })
+                  body: JSON.stringify(addressBody(server)),
+                }, { track: controllers.current })
               : await requestJson(TOGGLE_URL, {
                   method: 'POST',
                   headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ server: key, enabled: action === 'start' }),
-                })
-            if (alive.current) {
-              setState(body)
-              setFailure(null)
+                  body: JSON.stringify(Object.assign(addressBody(server), { enabled: action === 'start' })),
+                }, { track: controllers.current })
+            if (!alive.current) return
+            if (seq > appliedSequence.current) {
+              appliedSequence.current = seq
+              if (body !== null && Array.isArray(body.servers)) setState(body)
+              setLoadError(null)
             }
+            setOutcome(outcomeOf(body, server, tRef.current))
           } catch (error) {
-            if (alive.current) setFailure(error && error.message ? error.message : String(error))
-            await load()
+            // Keep the action failure on screen: a following successful poll
+            // must not clear it, only the next action does.
+            if (!alive.current) return
+            setOutcome({ tone: 'error', text: serverLabel(server) + ': ' + errorText(error, tRef.current) })
           } finally {
             if (alive.current) {
               setPending((previous) => {
-                const next = Object.assign({}, previous)
-                delete next[key]
+                if (!previous.has(key)) return previous
+                const next = new Map(previous)
+                next.delete(key)
                 return next
               })
             }
           }
-        }, [load])
+        }, [])
 
         const servers = state !== null && Array.isArray(state.servers) ? state.servers : []
 
         const card = (server) => {
-          const key = server.id || server.serverName
-          const action = pending[key]
-          const busy = action !== undefined
-          const stateKey = busy ? 'starting' : String(server.status || 'unknown')
-          const label = busy
-            ? t(action === 'stop' ? 'stopping' : action === 'restart' ? 'restarting' : 'starting')
-            : t('status.' + stateKey)
+          const key = addressOf(server)
+          const pendingAction = pending.get(key)
+          const busy = pendingAction !== undefined
+          const stateKey = busy ? BUSY_STATE[pendingAction] : String(server.status || 'unknown')
+          const label = busy ? t(BUSY_STATE[pendingAction]) : t('status.' + stateKey)
           const tone = statusTone(stateKey)
           const meta = [server.transport, server.target, server.toolCount + ' ' + t('toolsUnit')]
             .filter((part) => typeof part === 'string' && part !== '')
             .join(' · ')
+          // The management half reports why a server failed to start; surface it
+          // instead of leaving "error" unexplained.
+          const diagnostic = typeof server.diagnostic === 'string' && server.diagnostic !== '' ? server.diagnostic : null
+          const description = diagnostic === null ? meta : meta === '' ? diagnostic : meta + ' · ' + diagnostic
+          const name = serverLabel(server)
           const restartButton = h('button', {
             type: 'button',
             className: 'dsh-mcp-icon-btn',
             disabled: busy,
-            title: t('restart'),
-            'aria-label': t('restart') + ' ' + server.serverName,
+            title: t('restart') + ' ' + name,
+            'aria-label': t('restart') + ' ' + name,
             onClick: () => act(server, 'restart'),
           }, restartGlyph())
           const switchButton = h('button', {
@@ -267,7 +404,9 @@ window.__ModuleLoader__.load({
             className: 'dsh-mcp-switch',
             disabled: busy,
             'aria-checked': server.enabled ? 'true' : 'false',
-            'aria-label': (server.enabled ? t('stop') : t('start')) + ' ' + server.serverName,
+            // The accessible name names the setting (this server), not the action
+            // that the next click would perform; aria-checked carries the state.
+            'aria-label': t('switchLabel') + ' ' + name,
             onClick: () => act(server, server.enabled ? 'stop' : 'start'),
           }, h('span', { className: 'dsh-mcp-switch-thumb', 'aria-hidden': 'true' }))
           return h('li', { key, className: 'dsh-mcp-card', 'data-state': stateKey },
@@ -275,9 +414,9 @@ window.__ModuleLoader__.load({
               h('span', { className: 'dsh-mcp-card-icon', 'aria-hidden': 'true' }, serverGlyph()),
               h('div', { className: 'dsh-mcp-card-main' },
                 h('div', { className: 'dsh-mcp-title-row' },
-                  h('span', { className: 'dsh-mcp-card-title' }, server.serverName),
+                  h('span', { className: 'dsh-mcp-card-title' }, name),
                   h('span', { className: 'dsh-mcp-tag', 'data-tone': tone }, label)),
-                h('p', { className: 'dsh-mcp-card-desc' }, meta)),
+                h('p', { className: 'dsh-mcp-card-desc', title: description }, description)),
               h('div', { className: 'dsh-mcp-card-end' }, restartButton, switchButton)))
         }
 
@@ -289,9 +428,9 @@ window.__ModuleLoader__.load({
               h('span', { className: 'dsh-mcp-skeleton dsh-mcp-skeleton-line' }))))
 
         let list
-        if (failure !== null) {
+        if (loadError !== null) {
           list = h('div', { className: 'dsh-mcp-failure', role: 'alert' },
-            h('span', { className: 'dsh-mcp-failure-text' }, t('failure') + ': ' + failure),
+            h('span', { className: 'dsh-mcp-failure-text' }, t('failure') + ': ' + loadError),
             h('button', { type: 'button', className: 'dsh-mcp-btn', onClick: load }, t('retry')))
         } else if (state === null) {
           list = h('ul', { className: 'dsh-mcp-cards', 'aria-busy': 'true', 'aria-label': t('loading') }, [0, 1].map(skeleton))
@@ -308,7 +447,15 @@ window.__ModuleLoader__.load({
                 t('title'),
                 state !== null ? h('span', { className: 'dsh-mcp-group-info' }, servers.length + ' ' + t('countUnit')) : null)),
             h('p', { className: 'dsh-mcp-intro' }, t('description')),
-            list))
+            list,
+            // Always mounted, so the live region exists before the message it
+            // announces; a following poll leaves it untouched.
+            h('p', {
+              className: 'dsh-mcp-action',
+              'data-tone': outcome === null ? 'info' : outcome.tone,
+              role: 'status',
+              'aria-live': 'polite',
+            }, outcome === null ? '' : outcome.text)))
       }
     }
 
