@@ -517,6 +517,52 @@ runtimeTest('P1-11: the nested call is always reported in the result audit line'
   assert.match(resultText(orphanCall.result), /\(audit: dispatched mcp__bili__video; argument keys: none\)/)
 })
 
+runtimeTest('F12: whitespace-only nested content keeps the no-output fallback', async () => {
+  // A content block that carries only whitespace must not be treated as a
+  // payload: projecting it would replace the fallback sentence with blank text.
+  const mounted = await mountPlugin()
+  const agent = await mounted.createAgent('whitespace-agent')
+  const restore = stubNestedResult(mounted, 'mcp__rea__search', {
+    isError: false,
+    content: [{ type: 'text', text: '  \n' }],
+    value: 'blank',
+  })
+  try {
+    const { result } = await callTool(mounted.root, agent, 'mcp_call', { tool: 'mcp__rea__search', arguments: { q: 'x' } })
+    const text = resultText(result)
+    assert.match(text, /mcp__rea__search completed with no output\./, 'the fallback sentence survives whitespace-only content')
+    assert.match(text, /\(audit: dispatched mcp__rea__search; argument keys: q\)/, 'the audit line is still there')
+  } finally {
+    restore()
+  }
+
+  // An image-only result is a real payload and must still project its blocks.
+  const imageMounted = await mountPlugin()
+  const imageAgent = await imageMounted.createAgent('image-agent')
+  const imageBlock = { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' }
+  const restoreImage = stubNestedResult(imageMounted, 'mcp__rea__search', {
+    isError: false,
+    content: [imageBlock],
+    value: 'image',
+  })
+  try {
+    const { result } = await callTool(imageMounted.root, imageAgent, 'mcp_call', {
+      tool: 'mcp__rea__search',
+      arguments: {},
+    })
+    const blocks = Array.isArray(result?.content) ? result.content : []
+    assert.equal(blocks.some((block) => block?.type === 'image'), true, 'the image block is forwarded')
+    assert.match(
+      resultText(result),
+      /\(audit: dispatched mcp__rea__search; argument keys: none\)/,
+      'the projected content still carries the audit line',
+    )
+    assert.equal(resultText(result).includes('returned 1 image'), false, 'the projection replaces the image-count fallback')
+  } finally {
+    restoreImage()
+  }
+})
+
 // ---------------------------------------------------------------------------
 // P1-12 / F5 — warnOnce is per Agent object.
 // ---------------------------------------------------------------------------

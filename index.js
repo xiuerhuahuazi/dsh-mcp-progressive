@@ -832,13 +832,15 @@ export function apply(ctx, rawConfig) {
             const detail = text === '' ? (message !== '' ? message : 'no error message') : (text === `Error: ${message}` ? message : text)
             return withAudit(`Error from MCP tool "${toolName}": ${detail}`)
           }
-          // Only project when the nested call produced blocks: an empty result
-          // keeps the returned string (fallback sentence + audit line) as the
-          // outer content, so the fallback text is not dropped.
-          if (content.length > 0) pendingResults.set(exec, { content, audit })
+          // Only project when the nested call produced a payload worth showing:
+          // real text or at least one image block. An empty OR whitespace-only
+          // result keeps the returned fallback string + audit line as the outer
+          // content, so the "no output" sentence is not dropped by the
+          // projection (F12).
           const text = contentText(content)
-          if (text.trim() !== '') return withAudit(text)
           const imageCount = content.filter((block) => block?.type === 'image').length
+          if (text.trim() !== '' || imageCount > 0) pendingResults.set(exec, { content, audit })
+          if (text.trim() !== '') return withAudit(text)
           return withAudit(
             imageCount > 0 ? `(${toolName} returned ${imageCount} image(s).)` : `(${toolName} completed with no output.)`,
           )
