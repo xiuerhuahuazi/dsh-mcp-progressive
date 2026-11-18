@@ -497,10 +497,18 @@ export function apply(ctx, rawConfig) {
         const server = typeof exec.arguments?.server === 'string' && exec.arguments.server !== ''
           ? exec.arguments.server
           : 'the target server'
+        const verb = action === 'stop' ? 'Stop' : action === 'restart' ? 'Restart' : 'Start'
+        const zhVerb = action === 'stop' ? '停止' : action === 'restart' ? '重启' : '启动'
         return {
           kind: 'ask',
           reason: `mcp_server will ${action} MCP server "${server}", changing which MCP tools exist for every session.`,
-          displayReason: `${action === 'stop' ? 'Stop' : action === 'restart' ? 'Restart' : 'Start'} MCP server "${server}"?`,
+          // `PreToolDecision.ask.displayReason` is a locale record resolved by
+          // `locale.resolveText` (`en` required, other locales fall back to
+          // it), so ship English and Chinese rather than a bare string.
+          displayReason: {
+            en: `${verb} MCP server "${server}"?`,
+            zh: `${zhVerb} MCP 服务器「${server}」？`,
+          },
         }
       } catch {
         return await next()

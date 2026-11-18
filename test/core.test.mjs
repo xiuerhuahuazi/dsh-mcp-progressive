@@ -581,14 +581,36 @@ runtimeTest('P1-7: mcp_server writes ask for approval while mcp_servers stays un
   )
   const agent = await mounted.createAgent('approval-agent')
 
-  await callTool(mounted.root, agent, 'mcp_server', { server: 'rea', action: 'restart' })
-  assert.equal(requests.length, 1, 'a write action asks for approval')
-  assert.equal(requests[0].toolName, 'mcp_server')
-  assert.match(requests[0].displayReason, /Restart MCP server "rea"/, 'the human sees the concrete action')
-  assert.match(requests[0].reason, /changing which MCP tools exist/, 'the model-facing reason explains the effect')
+  for (const action of ['start', 'stop', 'restart']) {
+    await callTool(mounted.root, agent, 'mcp_server', { server: 'rea', action })
+  }
+  assert.equal(requests.length, 3, 'every write action asks for approval')
+  for (const request of requests) {
+    assert.equal(request.toolName, 'mcp_server')
+    assert.equal(typeof request.reason, 'string', 'reason stays the audited plain string')
+    assert.match(request.reason, /changing which MCP tools exist/, 'the model-facing reason explains the effect')
+    // PreToolDecision.ask.displayReason is a locale record, not a string: a
+    // consumer reading `.en` must find text.
+    assert.equal(typeof request.displayReason, 'object', 'displayReason is a locale record')
+    assert.ok(
+      request.displayReason !== null && !Array.isArray(request.displayReason),
+      'displayReason is a plain locale record',
+    )
+    assert.equal(typeof request.displayReason.en, 'string', 'the required en entry is present')
+    assert.ok(request.displayReason.en.length > 0, 'the en entry is not empty')
+    assert.equal(typeof request.displayReason.zh, 'string', 'the zh translation is present')
+    assert.ok(request.displayReason.zh.length > 0, 'the zh entry is not empty')
+  }
+  const byAction = (word) => requests.find((request) => request.reason.includes(` ${word} `))
+  assert.match(byAction('start').displayReason.en, /^Start MCP server "rea"\?$/)
+  assert.match(byAction('stop').displayReason.en, /^Stop MCP server "rea"\?$/)
+  assert.match(byAction('restart').displayReason.en, /^Restart MCP server "rea"\?$/)
+  assert.match(byAction('start').displayReason.zh, /^启动 MCP 服务器「rea」？$/)
+  assert.match(byAction('stop').displayReason.zh, /^停止 MCP 服务器「rea」？$/)
+  assert.match(byAction('restart').displayReason.zh, /^重启 MCP 服务器「rea」？$/)
 
   await callTool(mounted.root, agent, 'mcp_servers', {})
-  assert.equal(requests.length, 1, 'the read tool is not gated')
+  assert.equal(requests.length, 3, 'the read tool is not gated')
 
   const rejected = await mountPlugin()
   rejected.root.reflect.provide('connection', { requestRejection: () => undefined }, () => true)
