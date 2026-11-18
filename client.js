@@ -30,7 +30,7 @@ window.__ModuleLoader__.load({
       en: {
         tabTitle: 'MCP servers',
         title: 'MCP servers',
-        description: 'Start, stop or restart the MCP servers configured for this profile. Changes are written to the profile patch and apply to every session.',
+        description: 'Start, stop or restart the MCP servers configured for this profile. The choice is persisted (profile patch, or the home patch for home-inserted rows) and applies to every session.',
         countUnit: 'servers',
         toolsUnit: 'tools',
         empty: 'No MCP servers are configured for this profile.',
@@ -60,7 +60,7 @@ window.__ModuleLoader__.load({
       zh: {
         tabTitle: 'MCP 服务器',
         title: 'MCP 服务器',
-        description: '启动、停止或重启当前 profile 配置的 MCP 服务器；修改会写入 profile 补丁并对所有会话生效。',
+        description: '启动、停止或重启当前 profile 配置的 MCP 服务器；选择会持久化（profile 补丁；home 层插入的行写入 home 补丁）并对所有会话生效。',
         countUnit: '个',
         toolsUnit: '个工具',
         empty: '当前 profile 没有配置 MCP 服务器。',
