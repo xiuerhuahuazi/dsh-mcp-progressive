@@ -1,22 +1,33 @@
 #!/usr/bin/env node
 /**
- * "Before" evidence generator for the 1.2.0 review findings.
+ * Review-defect regression gate (and the 1.2.0 "before" evidence generator).
  *
- * This script is *evidence*, not a test suite: it drives the **current**
- * plugin and reports whether the defects the 2026-11-19 review reproduced are
- * still present. Every probe family maps to one finding:
+ * The 2026-11-19 review reproduced six defect families against
+ * dsh-mcp-progressive 1.2.0. Every family maps to one finding:
  *
- *   A  S3   the hand-written YAML rewrite corrupts a valid patch file
+ *   A  S3    the hand-written YAML rewrite corrupts a valid patch file
  *   B  S1/S2 the management routes have no admission and coerce `enabled`
- *   C  S5   a stop and a start issued together execute only the stop
- *   D  S11  a failed panel action is cleared by the next poll
- *   E  S9   the catalog search is AND-shaped and case-sensitive
- *   F  S10  `detail:"full"` prints an invalid JSON schema
+ *   C  S5    a stop and a start issued together execute only the stop
+ *   D  S11   a failed panel action is cleared by the next poll
+ *   E  S9    the catalog search is AND-shaped and case-sensitive
+ *   F  S10   `detail:"full"` prints an invalid JSON schema
  *
- * Exit code 0 means "the defects reproduced" (that is the expected outcome on
- * the 1.2.0 baseline). Exit code 1 means a defect no longer reproduces.
+ * Modes
+ * -----
+ * `--expect fixed` (default) is the regression gate: exit 0 when NONE of the
+ * six families reproduces, and exit 1 with a `REGRESSION: <families>` line
+ * when one does. Where a family can observe the repaired outcome (management
+ * admission, the control queue, the rendered panel message, search recall,
+ * schema fitting), the gate also requires that outcome, so a partial
+ * regression cannot hide behind "not reproduced". A family that cannot be
+ * verified without the DSH runtime is reported as `skip` with its reason
+ * instead of silently passing.
  *
- * Usage: node scripts/repro-review.mjs [--json] [--catalog <file>]
+ * `--expect baseline` keeps the original behaviour: exit 0 when all six
+ * families ARE reproduced. It only matches a v1.2.0 checkout — on a repaired
+ * checkout it reports honestly that the checkout is not 1.2.0 and exits 1.
+ *
+ * Usage: node scripts/repro-review.mjs [--expect fixed|baseline] [--json] [--catalog <file>]
  */
 
 import fs from 'node:fs'
@@ -28,9 +39,19 @@ import { parse as parseYaml, parseDocument } from 'yaml'
 import { createManagementEnv, findNode, mountClientPanel, request } from '../test/harness.mjs'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const RUNTIME = process.env.DSH_RUNTIME ?? '/tmp/dsh-asar/dsh/node_modules/@deepseek-ai'
 const PLUGIN = await import(path.join(REPO_ROOT, 'index.js'))
 
 const argv = process.argv.slice(2)
+const flag = (name, fallback) => {
+  const index = argv.indexOf(name)
+  return index >= 0 && argv[index + 1] !== undefined ? argv[index + 1] : fallback
+}
+const expectation = flag('--expect', 'fixed')
+if (expectation !== 'fixed' && expectation !== 'baseline') {
+  console.error(`repro-review: --expect must be "fixed" or "baseline", got ${JSON.stringify(expectation)}`)
+  process.exit(2)
+}
 const wantJson = argv.includes('--json')
 const catalogFlag = argv.indexOf('--catalog')
 const catalogOverride = catalogFlag >= 0 ? argv[catalogFlag + 1] : undefined
@@ -100,60 +121,31 @@ function duplicateDisabledKeysIn(text) {
   return false
 }
 
-/** The platform rule an `insert` entry follows: its own overrides are skipped. */
-function composeLocally(base, patches) {
-  const data = structuredClone(base)
-  const map = new Map()
-  const build = (entries) => {
-    for (const entry of entries) {
-      if (entry.id) map.set(entry.id, entry)
-      if (entry.group && Array.isArray(entry.config)) build(entry.config)
-    }
-  }
-  build(data)
-  for (const patch of patches) {
-    const { id, insert, name, ...overrides } = patch
-    if (insert) {
-      const clone = structuredClone(insert)
-      if (id) {
-        const target = map.get(id)
-        if (!target?.group) continue
-        if (!Array.isArray(target.config)) target.config = []
-        target.config.push(...clone)
-      } else {
-        data.push(...clone)
-      }
-      build(clone)
-      continue
-    }
-    const target = map.get(id)
-    if (!target) continue
-    if (name && name !== target.name) continue
-    for (const [key, value] of Object.entries(overrides)) {
-      if (key === 'id') continue
-      target[key] = value
-    }
-  }
-  return data
-}
-
 async function probeYaml() {
   const { setPatchDisabled, patchDeclares } = PLUGIN.__test
   const base = [{ id: 'demo', name: '@deepseek-ai/dsh-mcp-client', disabled: false }]
 
-  let composer = composeLocally
-  let composerSource = 'local approximation of the platform rule'
+  // Part of this family is the *effective* composition, which only the real
+  // platform rule can decide (an `insert` entry's own overrides are skipped).
+  // Without the DSH runtime the family is skipped rather than guessed: a local
+  // approximation could hide a real regression, which is exactly what a
+  // regression gate must not do.
+  let composer
   try {
-    const include = await import(
-      path.join(process.env.DSH_RUNTIME ?? '/tmp/dsh-asar/dsh/node_modules/@deepseek-ai', 'cordis-plugin-include', 'lib', 'index.js')
-    )
+    const include = await import(path.join(RUNTIME, 'cordis-plugin-include', 'lib', 'index.js'))
     if (typeof include.applyEntryPatches === 'function') {
       composer = (data, patches) => include.applyEntryPatches(data, patches, () => {})
-      composerSource = 'real @deepseek-ai/cordis-plugin-include'
     }
   } catch {
-    // Keep the local approximation.
+    // Reported as a skip below.
   }
+  if (composer === undefined) {
+    return {
+      finding: 'S3 — hand-written YAML rewrite corrupts a valid patch file',
+      skip: `the DSH runtime (${RUNTIME}) is not installed; the platform insert/override rule cannot be verified without it (set DSH_RUNTIME)`,
+    }
+  }
+  const composerSource = 'real @deepseek-ai/cordis-plugin-include'
 
   const rows = []
   for (const [name, input, id] of YAML_FIXTURES) {
@@ -209,6 +201,7 @@ async function probeYaml() {
       error: row.error,
     })),
     reproduced: broken.length > 0 && duplicated.length > 0 && insertIgnored.length > 0,
+    fixed: broken.length === 0 && duplicated.length === 0 && insertIgnored.length === 0,
   }
 }
 
@@ -216,55 +209,149 @@ async function probeYaml() {
 // Probe B — the management routes (findings S1 and S2).
 // ---------------------------------------------------------------------------
 
-async function probeManagementAdmission() {
-  const env = await createManagementEnv()
+const ROUTE_STATE = '/dsh-mcp-hub/state'
+const ROUTE_TOGGLE = '/dsh-mcp-hub/toggle'
+/** Review probe cookie: the fake stub only tells "has a browser credential"
+ * from "has none"; the real signature is validated by scripts/live-boot.mjs
+ * against the platform's own browser auth. */
+const PROBE_COOKIE = 'dsh-auth-review-probe=1'
+
+/**
+ * Mirror of the platform admission fence (`dsh-client-connection`'s
+ * `isTrustedApiRequest` + browser auth) for the fake management context:
+ * fenced Host/Origin → 403, trusted Host without a cookie → 401. This is a
+ * stub: the real-platform authority is `scripts/live-boot.mjs`, which boots the
+ * real web app and uses the platform's own fence.
+ */
+function platformFence(req) {
+  const host = String(req.headers?.host ?? '')
+  const hostname = host.replace(/:\d+$/, '').toLowerCase()
+  if (hostname !== '127.0.0.1' && hostname !== 'localhost' && hostname !== '[::1]') return 403
+  if (String(req.headers?.['sec-fetch-site'] ?? '').toLowerCase() === 'cross-site') return 403
+  const origin = req.headers?.origin
+  if (origin !== undefined) {
+    try {
+      if (new URL(origin).host !== host) return 403
+    } catch {
+      return 403
+    }
+  }
+  return typeof req.headers?.cookie === 'string' && req.headers.cookie !== '' ? undefined : 401
+}
+
+/** Run one probe against a fresh fake environment (state never leaks between probes). */
+async function withEnv(run) {
+  const env = await createManagementEnv({ rejection: platformFence })
   try {
-    const unauthenticated = await request(env, '/dsh-mcp-hub/state')
-    const badHost = await request(env, '/dsh-mcp-hub/state', { headers: { host: 'attacker.invalid:3080' } })
-    const textPlain = await request(env, '/dsh-mcp-hub/toggle', {
-      method: 'POST',
-      headers: { 'content-type': 'text/plain', origin: 'https://attacker.invalid', 'sec-fetch-site': 'cross-site' },
-      body: { server: 'demo', enabled: false },
-    })
-    const getToggle = await request(env, '/dsh-mcp-hub/toggle', { method: 'GET' })
-    const deleteState = await request(env, '/dsh-mcp-hub/state', { method: 'DELETE' })
-
-    const coercions = []
-    for (const enabled of ['true', undefined, null, 1]) {
-      const local = await createManagementEnv()
-      try {
-        const response = await request(local, '/dsh-mcp-hub/toggle', {
-          method: 'POST',
-          body: enabled === undefined ? { server: 'demo' } : { server: 'demo', enabled },
-        })
-        coercions.push({
-          sent: enabled === undefined ? '<missing>' : JSON.stringify(enabled),
-          status: response.status,
-          calls: local.calls,
-          finalEnabled: local.row.enabled,
-          treatedAs: local.row.enabled === false ? 'stop' : 'start',
-        })
-      } finally {
-        await local.dispose()
-      }
-    }
-
-    return {
-      finding: 'S1/S2 — the management routes have no admission and coerce `enabled`',
-      unauthenticatedState: { status: unauthenticated.status, leaked: unauthenticated.status === 200 },
-      badHostState: { status: badHost.status, accepted: badHost.status === 200 },
-      textPlainToggle: { status: textPlain.status, accepted: textPlain.status === 200 },
-      getOnToggle: { status: getToggle.status, accepted: getToggle.status === 200 },
-      deleteOnState: { status: deleteState.status, accepted: deleteState.status === 200 },
-      enabledCoercion: coercions,
-      reproduced:
-        unauthenticated.status === 200 &&
-        badHost.status === 200 &&
-        textPlain.status === 200 &&
-        coercions.every((entry) => entry.treatedAs === 'stop'),
-    }
+    return await run(env)
   } finally {
     await env.dispose()
+  }
+}
+
+/** Uppercase tokens of an `Allow` response header. */
+function allowOf(response) {
+  const raw = response.headers?.allow
+  if (typeof raw !== 'string') return []
+  return raw
+    .split(',')
+    .map((token) => token.trim().toUpperCase())
+    .filter((token) => token !== '')
+}
+
+/** Whether a response body is the JSON refusal both the panel and the model need. */
+function isJsonRefusal(response) {
+  const body = response.body
+  return body !== null && typeof body === 'object' && body.ok === false && typeof body.error === 'string'
+}
+
+async function probeManagementAdmission() {
+  const cookie = { cookie: PROBE_COOKIE }
+  const unauthenticated = await withEnv((env) => request(env, ROUTE_STATE))
+  const authenticated = await withEnv((env) => request(env, ROUTE_STATE, { headers: cookie }))
+  const badHost = await withEnv((env) =>
+    request(env, ROUTE_STATE, { headers: { host: 'attacker.invalid:3080', ...cookie } }),
+  )
+  const textPlain = await withEnv((env) =>
+    request(env, ROUTE_TOGGLE, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain', ...cookie },
+      body: { server: 'demo', enabled: false },
+    }),
+  )
+  const getToggle = await withEnv((env) => request(env, ROUTE_TOGGLE, { headers: cookie }))
+  const deleteState = await withEnv((env) => request(env, ROUTE_STATE, { method: 'DELETE', headers: cookie }))
+  const postState = await withEnv((env) => request(env, ROUTE_STATE, { method: 'POST', headers: cookie }))
+
+  const coercions = []
+  for (const enabled of ['true', undefined, null, 1]) {
+    const entry = await withEnv(async (env) => {
+      const response = await request(env, ROUTE_TOGGLE, {
+        method: 'POST',
+        headers: cookie,
+        body: enabled === undefined ? { server: 'demo' } : { server: 'demo', enabled },
+      })
+      return {
+        sent: enabled === undefined ? '<missing>' : JSON.stringify(enabled),
+        status: response.status,
+        jsonRefusal: isJsonRefusal(response),
+        calls: env.calls.map((call) => ({ ...call })),
+        finalEnabled: env.row.enabled,
+      }
+    })
+    coercions.push(entry)
+  }
+
+  // The repaired behaviour (1.2.1). `enabled` must be a boolean, the write
+  // routes must demand JSON, and an unauthenticated / untrusted peer must get a
+  // JSON refusal before any handler body runs.
+  const fixed =
+    [401, 403].includes(unauthenticated.status) &&
+    isJsonRefusal(unauthenticated) &&
+    badHost.status === 403 &&
+    isJsonRefusal(badHost) &&
+    textPlain.status === 415 &&
+    isJsonRefusal(textPlain) &&
+    getToggle.status === 405 &&
+    allowOf(getToggle).includes('POST') &&
+    isJsonRefusal(getToggle) &&
+    deleteState.status === 405 &&
+    ['GET', 'HEAD'].every((method) => allowOf(deleteState).includes(method)) &&
+    postState.status === 405 &&
+    ['GET', 'HEAD'].every((method) => allowOf(postState).includes(method)) &&
+    isJsonRefusal(postState) &&
+    authenticated.status === 200 &&
+    coercions.every((entry) => entry.status === 400 && entry.jsonRefusal && entry.calls.length === 0 && entry.finalEnabled === true)
+
+  // The 1.2.0 defects: no admission, any media type reaches the handler, and an
+  // invalid `enabled` is coerced into "stop".
+  const reproduced =
+    unauthenticated.status === 200 &&
+    badHost.status === 200 &&
+    textPlain.status === 200 &&
+    coercions.every(
+      (entry) =>
+        entry.status === 200 &&
+        entry.calls.length === 1 &&
+        entry.calls[0].enabled === false &&
+        entry.finalEnabled === false,
+    )
+
+  return {
+    finding: 'S1/S2 — the management routes have no admission and coerce `enabled`',
+    verifiedBy: 'fake connection stub mirroring the platform fence; the real-platform authority is scripts/live-boot.mjs',
+    admission: {
+      unauthenticatedState: { status: unauthenticated.status, jsonRefusal: isJsonRefusal(unauthenticated) },
+      authenticatedState: { status: authenticated.status },
+      badHostState: { status: badHost.status, jsonRefusal: isJsonRefusal(badHost) },
+      textPlainToggle: { status: textPlain.status, jsonRefusal: isJsonRefusal(textPlain) },
+      getOnToggle: { status: getToggle.status, allow: allowOf(getToggle) },
+      deleteOnState: { status: deleteState.status, allow: allowOf(deleteState) },
+      postOnState: { status: postState.status, allow: allowOf(postState) },
+    },
+    enabledCoercion: coercions,
+    reproduced,
+    fixed,
   }
 }
 
@@ -273,19 +360,30 @@ async function probeManagementAdmission() {
 // ---------------------------------------------------------------------------
 
 async function probeControlQueue() {
-  const env = await createManagementEnv()
+  // An authenticated panel request: the queue is what is under test here, not
+  // admission (probe B covers that), but driving the same path the panel uses
+  // keeps the two concurrent calls realistic.
+  const env = await createManagementEnv({ rejection: platformFence })
   try {
+    const headers = { cookie: PROBE_COOKIE }
     const [stop, start] = await Promise.all([
-      request(env, '/dsh-mcp-hub/toggle', { method: 'POST', body: { server: 'demo', enabled: false } }),
-      request(env, '/dsh-mcp-hub/toggle', { method: 'POST', body: { server: 'demo', enabled: true } }),
+      request(env, '/dsh-mcp-hub/toggle', { method: 'POST', headers, body: { server: 'demo', enabled: false } }),
+      request(env, '/dsh-mcp-hub/toggle', { method: 'POST', headers, body: { server: 'demo', enabled: true } }),
     ])
+    const managerCalls = env.calls.map((call) => ({ ...call }))
     return {
       finding: 'S5 — a stop and a start issued together execute only the stop',
       stopStatus: stop.status,
       startStatus: start.status,
-      managerCalls: env.calls,
+      managerCalls,
       finalEnabled: env.row.enabled,
-      reproduced: env.calls.length === 1 && env.calls[0]?.enabled === false && env.row.enabled === false,
+      reproduced: managerCalls.length === 1 && managerCalls[0]?.enabled === false && env.row.enabled === false,
+      // Repaired: both queued operations run, in issue order, and the last one wins.
+      fixed:
+        managerCalls.length === 2 &&
+        managerCalls[0]?.enabled === false &&
+        managerCalls[1]?.enabled === true &&
+        env.row.enabled === true,
     }
   } finally {
     await env.dispose()
@@ -295,6 +393,13 @@ async function probeControlQueue() {
 // ---------------------------------------------------------------------------
 // Probe D — the client panel (finding S11).
 // ---------------------------------------------------------------------------
+
+/** Flatten a render tree to its visible text. */
+function renderText(node) {
+  if (node === null || node === undefined || node === false || node === true) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  return (node.children ?? []).map(renderText).join(' ')
+}
 
 async function probeClient() {
   const serverRow = {
@@ -308,34 +413,12 @@ async function probeClient() {
   }
   const okResponse = () => ({ ok: true, status: 200, json: async () => ({ ok: true, now: 1, servers: [serverRow] }) })
 
-  // Case 1 — the action error is wiped before the user can read it: `act()`
-  // calls `setFailure(...)` and then immediately refreshes, and a successful
-  // refresh resets the failure to null.
+  // Observe the *rendered* panel, not a React hook slot: the 1.2.1 client split
+  // the action outcome out of the load-error state, so a hook index would read
+  // the wrong value and could report a false "not reproduced". What a user can
+  // see is the contract: after a failed action the message must stay on screen,
+  // even after a following successful poll (which must not clear it).
   let posts = 0
-  const immediate = mountClientPanel({
-    locale: { active: 'en' },
-    fetch: async (_url, init) => {
-      if (init?.method === 'POST') {
-        posts += 1
-        throw new Error('SYNTHETIC restart failure')
-      }
-      return okResponse()
-    },
-  })
-  let failureAfterActionImmediate = null
-  try {
-    await immediate.flush()
-    const restart = findNode(immediate.render(), (node) => node.props.className === 'dsh-mcp-icon-btn')
-    await restart.props.onClick()
-    await immediate.flush()
-    failureAfterActionImmediate = immediate.slots[1]
-  } finally {
-    immediate.unmount()
-  }
-
-  // Case 2 — with the refresh failing as well, the error stays visible after
-  // the action and is then cleared by the following poll.
-  let gets = 0
   const panel = mountClientPanel({
     locale: { active: 'en' },
     fetch: async (_url, init) => {
@@ -343,8 +426,6 @@ async function probeClient() {
         posts += 1
         throw new Error('SYNTHETIC restart failure')
       }
-      gets += 1
-      if (gets === 2) throw new Error('SYNTHETIC list failure')
       return okResponse()
     },
   })
@@ -353,17 +434,19 @@ async function probeClient() {
     const restart = findNode(panel.render(), (node) => node.props.className === 'dsh-mcp-icon-btn')
     await restart.props.onClick()
     await panel.flush()
-    const failureAfterAction = panel.slots[1]
+    const failureAfterAction = renderText(panel.render()).includes('SYNTHETIC restart failure')
     await panel.poll()
     await panel.flush()
-    const failureAfterPoll = panel.slots[1]
+    const failureAfterPoll = renderText(panel.render()).includes('SYNTHETIC restart failure')
     return {
       finding: 'S11 — a failed panel action is cleared by the next poll',
       posts,
-      failureAfterActionImmediate,
       failureAfterAction,
       failureAfterPoll,
-      reproduced: failureAfterAction !== null && failureAfterAction !== undefined && failureAfterPoll === null,
+      // 1.2.0 wiped the action failure on the refresh that follows it; the fixed
+      // client keeps it until the next action.
+      reproduced: !(failureAfterAction && failureAfterPoll),
+      fixed: failureAfterAction && failureAfterPoll,
     }
   } finally {
     panel.unmount()
@@ -455,20 +538,24 @@ async function probeSearch() {
     const serverCase = await run({ query: '', server: 'Rea' })
     const english = await run({ query: 'screenshot' })
 
+    const queries = {
+      '浏览器': browser.matches,
+      'b站 下载': bili.matches,
+      'browser navigate': navigate.matches,
+      'server:"Rea"': serverCase.matches,
+      screenshot: english.matches,
+    }
+    const serverCaseEmptyState = serverCase.answer.includes('No MCP tools are registered right now')
     return {
       finding: 'S9 — the catalog search is AND-shaped and case-sensitive',
       catalog: catalog.source,
       catalogSize: catalog.tools.length,
-      queries: {
-        '浏览器': browser.matches,
-        'b站 下载': bili.matches,
-        'browser navigate': navigate.matches,
-        'server:"Rea"': serverCase.matches,
-        screenshot: english.matches,
-      },
-      serverCaseEmptyState: serverCase.answer.includes('No MCP tools are registered right now'),
-      reproduced:
-        browser.matches === 0 && bili.matches === 0 && navigate.matches === 0 && serverCase.matches === 0,
+      queries,
+      serverCaseEmptyState,
+      reproduced: browser.matches === 0 && bili.matches === 0 && navigate.matches === 0 && serverCase.matches === 0,
+      // Repaired: every probed query recalls something, and a server-scoped
+      // query never claims the catalog is empty.
+      fixed: Object.values(queries).every((count) => count > 0) && serverCaseEmptyState === false,
     }
   } finally {
     await env.dispose()
@@ -499,7 +586,7 @@ function syntheticLargeSchema() {
 
 async function probeFullSchema() {
   const catalog = loadCatalog()
-  let target = catalog.tools.find((tool) => tool.name.endsWith('__compare_web_captures'))
+  const target = catalog.tools.find((tool) => tool.name.endsWith('__compare_web_captures'))
   let parameters = target?.parameters
   let source = 'real catalog'
   if (parameters === undefined) {
@@ -515,30 +602,42 @@ async function probeFullSchema() {
     env.ctx.tools.schemas = () => [entry]
     env.ctx.tools.definitions = () => [...registered, entry]
     const search = registered.find((definition) => definition.name === 'mcp_search')
-    const answer = await search.execute(
-      { query: 'compare_web_captures', detail: 'full' },
-      { agent: { id: 'probe' } },
-    )
+    const answer = await search.execute({ query: 'compare_web_captures', detail: 'full' }, { agent: { id: 'probe' } })
     const lines = answer.split('\n')
+    // The repaired contract has two honest outcomes: a printed schema that
+    // parses, or an explicit "schema omitted: too large … signature: …" notice.
+    // 1.2.0 printed a hard-cut JSON string, which is the defect.
     const marker = lines.findIndex((line) => line.startsWith('schema for '))
+    const omissionLine = lines.find((line) => line.startsWith('schema omitted: too large'))
+    // The notice is only honest when it names a callable signature.
+    const omitted = marker < 0 && omissionLine !== undefined && omissionLine.includes('signature:')
     const schemaText = marker >= 0 ? (lines[marker + 1] ?? '') : ''
-    let parses = true
+    let parses = null
     let parseError = null
-    try {
-      JSON.parse(schemaText)
-    } catch (cause) {
-      parses = false
-      parseError = cause?.message ?? String(cause)
+    if (marker >= 0) {
+      try {
+        JSON.parse(schemaText)
+        parses = true
+      } catch (cause) {
+        parses = false
+        parseError = cause?.message ?? String(cause)
+      }
     }
+    const mode = marker >= 0 ? 'printed' : omitted ? 'omitted' : 'none'
     return {
       finding: 'S10 — `detail:"full"` prints an invalid JSON schema',
       source,
       schemaChars,
+      mode,
       printedChars: schemaText.length,
       parses,
       parseError,
       tail: schemaText.slice(-60),
-      reproduced: !parses,
+      // 1.2.0: a printed schema that does not parse.
+      reproduced: marker >= 0 && parses === false,
+      // Repaired: either a parseable printed schema, or the explicit omission
+      // notice instead of half a JSON document.
+      fixed: (marker >= 0 && parses === true) || omitted,
     }
   } finally {
     await env.dispose()
@@ -549,53 +648,111 @@ async function probeFullSchema() {
 // Driver.
 // ---------------------------------------------------------------------------
 
-const probes = {
-  yaml: await probeYaml(),
-  managementAdmission: await probeManagementAdmission(),
-  controlQueue: await probeControlQueue(),
-  client: await probeClient(),
-  search: await probeSearch(),
-  fullSchema: await probeFullSchema(),
+const FAMILIES = [
+  ['yaml', probeYaml],
+  ['managementAdmission', probeManagementAdmission],
+  ['controlQueue', probeControlQueue],
+  ['client', probeClient],
+  ['search', probeSearch],
+  ['fullSchema', probeFullSchema],
+]
+
+const probes = {}
+for (const [key, probe] of FAMILIES) probes[key] = await probe()
+
+/**
+ * One family's verdict for the selected mode.
+ *
+ *   skip            cannot be verified without the DSH runtime (never a pass).
+ *   ok              fixed: the defect does not reproduce and the repaired
+ *                   outcome (where the family can assert it) is observed.
+ *                   baseline: the 1.2.0 defect reproduces.
+ *   regression      fixed: the defect reproduces, or the repair is missing.
+ *   not-reproduced  baseline: this checkout is not 1.2.0.
+ */
+function verdictOf(probe) {
+  if (typeof probe.skip === 'string') return 'skip'
+  if (expectation === 'fixed') return probe.reproduced === false && probe.fixed !== false ? 'ok' : 'regression'
+  return probe.reproduced === true ? 'ok' : 'not-reproduced'
 }
 
-const reproduced = Object.values(probes).filter((probe) => probe.reproduced === true).length
+const entries = Object.entries(probes).map(([key, probe]) => ({ key, probe, verdict: verdictOf(probe) }))
+const reproduced = entries.filter((entry) => entry.probe.reproduced === true).length
+const skipped = entries.filter((entry) => entry.verdict === 'skip').length
+const failures = entries.filter((entry) => entry.verdict !== 'ok' && entry.verdict !== 'skip')
+// A skip never fails the fixed-mode gate (it is printed as a skip), but the
+// baseline mode only passes when all six families really reproduced.
+const pass = expectation === 'fixed' ? failures.length === 0 : failures.length === 0 && skipped === 0
+
 const result = {
   plugin: 'dsh-mcp-progressive',
-  version: '1.2.0-baseline',
+  expectation,
+  gate: expectation === 'fixed' ? 'regression (no reviewed defect may reproduce)' : 'baseline (1.2.0 only; all six must reproduce)',
   generatedAt: new Date().toISOString(),
   reproduced,
-  total: Object.keys(probes).length,
+  evaluated: entries.length - skipped,
+  skipped,
+  total: entries.length,
+  pass,
+  families: Object.fromEntries(entries.map((entry) => [entry.key, entry.verdict])),
   probes,
 }
 
 if (wantJson) {
   console.log(JSON.stringify(result, null, 2))
 } else {
-  const rows = Object.entries(probes).map(([key, probe]) => ({
-    probe: key,
-    finding: probe.finding,
-    reproduced: probe.reproduced ? 'YES' : 'no',
-  }))
-  const width = Math.max(...rows.map((row) => row.probe.length))
-  console.log('\ndsh-mcp-progressive 1.2.0 — review defect reproduction\n')
-  for (const row of rows) {
-    console.log(`  ${row.probe.padEnd(width)}  ${row.reproduced.padEnd(4)}  ${row.finding}`)
+  const modeLabel = expectation === 'fixed' ? 'expect fixed — regression gate' : 'expect baseline — 1.2.0 evidence only'
+  const width = Math.max(...entries.map((entry) => entry.key.length))
+  console.log(`\ndsh-mcp-progressive — review defect reproduction (${modeLabel})\n`)
+  for (const entry of entries) {
+    const verdict = entry.verdict === 'ok' ? 'ok  ' : entry.verdict === 'skip' ? 'skip' : 'FAIL'
+    console.log(`  ${verdict.padEnd(5)}  ${entry.key.padEnd(width)}  ${entry.probe.finding}`)
+    if (entry.verdict === 'skip') console.log(`         skip: ${entry.probe.skip}`)
   }
   console.log('')
-  console.log(`  A  YAML rewrite      valid inputs turned unparseable : ${probes.yaml.validInputsTurnedUnparseable}/${probes.yaml.fixtures}`)
-  console.log(`                        duplicate disabled keys        : ${probes.yaml.duplicateDisabledKeys}`)
-  console.log(`                        insert-group override ignored  : ${probes.yaml.insertGroupIgnore}`)
-  console.log(`  B  management routes unauthenticated /state          : ${probes.managementAdmission.unauthenticatedState.status}`)
-  console.log(`                        bad Host /state                 : ${probes.managementAdmission.badHostState.status}`)
-  console.log(`                        text/plain POST /toggle         : ${probes.managementAdmission.textPlainToggle.status}`)
+
+  if (probes.yaml.validInputsTurnedUnparseable !== undefined) {
+    console.log(`  A  YAML rewrite      valid inputs turned unparseable : ${probes.yaml.validInputsTurnedUnparseable}/${probes.yaml.fixtures}`)
+    console.log(`                        duplicate disabled keys        : ${probes.yaml.duplicateDisabledKeys}`)
+    console.log(`                        insert-group override ignored  : ${probes.yaml.insertGroupIgnore}`)
+  } else {
+    console.log('  A  YAML rewrite      skip (no DSH runtime for the platform composition rule)')
+  }
+  const admission = probes.managementAdmission.admission
+  console.log(`  B  management routes unauthenticated /state          : ${admission.unauthenticatedState.status}${admission.unauthenticatedState.jsonRefusal ? ' (JSON refusal)' : ''}`)
+  console.log(`                        bad Host /state                 : ${admission.badHostState.status}`)
+  console.log(`                        text/plain POST /toggle         : ${admission.textPlainToggle.status}`)
+  console.log(`                        GET /toggle                     : ${admission.getOnToggle.status} allow=[${admission.getOnToggle.allow.join(', ')}]`)
+  console.log(`                        DELETE /state                   : ${admission.deleteOnState.status} allow=[${admission.deleteOnState.allow.join(', ')}]`)
+  console.log(`                        POST /state                     : ${admission.postOnState.status} allow=[${admission.postOnState.allow.join(', ')}]`)
   for (const entry of probes.managementAdmission.enabledCoercion) {
-    console.log(`                        enabled=${entry.sent.padEnd(10)} -> ${entry.treatedAs}`)
+    console.log(`                        enabled=${entry.sent.padEnd(10)} -> status ${entry.status}, manager calls ${entry.calls.length}, row enabled ${entry.finalEnabled}`)
   }
   console.log(`  C  control queue     manager calls for stop+start     : ${probes.controlQueue.managerCalls.length} (${JSON.stringify(probes.controlQueue.managerCalls)})`)
   console.log(`  D  client panel      failure after action / after poll: ${probes.client.failureAfterAction} / ${probes.client.failureAfterPoll}`)
   console.log(`  E  search            matches per query                : ${JSON.stringify(probes.search.queries)}`)
-  console.log(`  F  full schema       ${probes.fullSchema.schemaChars} chars -> valid JSON: ${probes.fullSchema.parses}`)
-  console.log(`\n  ${reproduced}/${Object.keys(probes).length} defect families reproduced\n`)
+  const schemaOutcome =
+    probes.fullSchema.mode === 'omitted'
+      ? 'omitted with a signature (too large to print in full)'
+      : probes.fullSchema.mode === 'printed'
+        ? probes.fullSchema.parses
+          ? 'valid JSON'
+          : 'INVALID JSON'
+        : 'no schema printed'
+  console.log(`  F  full schema       ${probes.fullSchema.schemaChars} chars -> ${schemaOutcome}`)
+  console.log(`\n  ${reproduced}/${entries.length} defect families reproduced (${entries.length - skipped} evaluated, ${skipped} skipped)`)
+
+  if (pass && expectation === 'fixed') {
+    console.log('  PASS — no reviewed defect reproduces (regression gate)\n')
+  } else if (pass) {
+    console.log('  PASS — every reviewed 1.2.0 defect reproduces (this checkout is 1.2.0)\n')
+  } else if (expectation === 'fixed') {
+    console.log(`  REGRESSION: ${failures.map((entry) => entry.key).join(', ')}\n`)
+  } else if (failures.length > 0) {
+    console.log(`  NOT A 1.2.0 CHECKOUT: ${failures.map((entry) => entry.key).join(', ')} no longer reproduce\n`)
+  } else {
+    console.log(`  CANNOT DOCUMENT 1.2.0: ${entries.filter((entry) => entry.verdict === 'skip').map((entry) => entry.key).join(', ')} skipped (no DSH runtime)\n`)
+  }
 }
 
-process.exit(reproduced === Object.keys(probes).length ? 0 : 1)
+process.exit(pass ? 0 : 1)
