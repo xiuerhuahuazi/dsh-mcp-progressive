@@ -25,10 +25,30 @@
  * an authenticated peer), a JSON content type on the write routes, a strict
  * method check (405 + `Allow`), and strict request bodies (400).
  *
+ * It also proves 1.3's live connection status end to end, because that is the
+ * only place the Loader entry seam meets a real MCP client:
+ *
+ *   1. the temp profile patch declares two `@deepseek-ai/dsh-mcp-client`
+ *      loader rows — `mcp-probe-broken` (a command that cannot spawn) and
+ *      `mcp-probe-ok` (a minimal stdio MCP server written inside the temp
+ *      home that exposes two tools),
+ *   2. the gate waits until both rows have a settled live state (a bad spawn
+ *      exhausts its reconnect budget, the real server answers `initialize`),
+ *   3. `state-live-broken` requires the `/state` row to read `status: "error"`,
+ *      `live.state: "failed"` and a `statusDetail` carrying the spawn error —
+ *      the row's `fiberPhase` may well be `active`, which is exactly why
+ *      inference alone would have said `idle`;
+ *   4. `state-live-connected` requires `status: "running"`,
+ *      `live.state: "connected"`, `live.toolCount >= 2` and no
+ *      `statusDetail`.
+ *
  * `--expect baseline` documents the 1.2.0 behaviour and ONLY matches a v1.2.0
  * checkout: there the routes had no admission, accepted any media type and
  * coerced an invalid `enabled` to "stop". It exits 1 on this checkout, by
- * design; that is not a regression.
+ * design; that is not a regression. The two `state-live-*` probes are reported
+ * as `skip` there: rows carry no `live` field and 1.3's loader-row additions
+ * cannot exist in 1.2.0, so asserting them would be dishonest rather than
+ * informative. They are skipped in fallback mode too (no real Loader rows).
  *
  * Usage: node scripts/live-boot.mjs [--expect fixed|baseline] [--port N] [--json] [--keep]
  *
@@ -63,6 +83,24 @@ if (expectation !== 'baseline' && expectation !== 'fixed') {
 }
 
 /**
+ * The two MCP loader rows the throw-away profile declares.
+ *
+ * They are the only honest way to reach the live-status seam: the rows make
+ * the real `@deepseek-ai/dsh-mcp-client` import into the app's Loader, which
+ * is what populates `entry.moduleNamespace` and its per-fiber status cell.
+ */
+const MCP_ROW_BROKEN = 'mcp-probe-broken'
+const MCP_ROW_OK = 'mcp-probe-ok'
+const MCP_SERVER_BROKEN = 'probe-broken'
+const MCP_SERVER_OK = 'probe-ok'
+/** A command that cannot exist, so the client's spawn fails with ENOENT. */
+const BROKEN_COMMAND = '/nonexistent/definitely-not-a-command'
+/** The route both the gate and the live-settle wait read. */
+const ROUTE_STATE = '/dsh-mcp-hub/state'
+/** How long both rows may take to reach a settled live state. */
+const LIVE_SETTLE_MS = 30_000
+
+/**
  * What each probe must answer under each expectation.
  *
  * `status` is the single accepted status; `accept` accepts one of several
@@ -72,6 +110,8 @@ if (expectation !== 'baseline' && expectation !== 'fixed') {
  * `allow` lists the methods the answer must advertise in `Allow`.
  * `jsonError` requires a JSON `{ok:false,error}` body instead of a body-less
  * reset, which is what a browser panel and the model both need.
+ * `row` checks one server row inside a `/state` answer (the two live probes).
+ * `skip` states why the probe cannot be asserted in that mode.
  */
 const EXPECTATIONS = {
   baseline: {
@@ -84,6 +124,10 @@ const EXPECTATIONS = {
     'toggle-no-content-type': { status: 404 },
     'state-wrong-method': { status: 200 },
     'state-authenticated': { status: 200 },
+    // 1.3 rows: 1.2.0 has neither the live field nor a Loader-row contract to
+    // assert, so the historical mode reports them honestly as skips.
+    'state-live-broken': { skip: 'a 1.2.0 row carries no live status; the row contract is a 1.3 addition' },
+    'state-live-connected': { skip: 'a 1.2.0 row carries no live status; the row contract is a 1.3 addition' },
   },
   fixed: {
     'state-unauthenticated': { status: 403, accept: [401, 403], jsonError: true },
@@ -95,12 +139,98 @@ const EXPECTATIONS = {
     'toggle-no-content-type': { status: 415, jsonError: true },
     'state-wrong-method': { status: 405, allow: ['GET', 'HEAD'], jsonError: true },
     'state-authenticated': { status: 200 },
+    'state-live-broken': {
+      status: 200,
+      row: {
+        serverName: MCP_SERVER_BROKEN,
+        status: 'error',
+        liveState: 'failed',
+        detailIncludes: 'ENOENT',
+      },
+    },
+    'state-live-connected': {
+      status: 200,
+      row: {
+        serverName: MCP_SERVER_OK,
+        status: 'running',
+        liveState: 'connected',
+        toolCountAtLeast: 2,
+        detailNull: true,
+      },
+    },
   },
 }
 
 /** The fallback cookie used when the real runtime does not mint one. */
 const FALLBACK_COOKIE = 'dsh-auth-fallback=1'
 const PROBE_TIMEOUT_MS = 15_000
+
+/**
+ * A minimal MCP server over stdio: JSON-RPC 2.0, one message per line, the
+ * three methods a client needs (`initialize`, `tools/list`, `tools/call`) and
+ * two tools. It never opens a socket, and stdin closing — which is what the
+ * owning app's teardown does — ends the process.
+ */
+const MINI_MCP_SERVER_SOURCE = `// Written by scripts/live-boot.mjs into the throw-away DSH home.
+import readline from 'node:readline'
+
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n')
+const reply = (id, result) => send({ jsonrpc: '2.0', id, result })
+
+const lines = readline.createInterface({ input: process.stdin })
+lines.on('line', (line) => {
+  if (line.trim() === '') return
+  let message
+  try {
+    message = JSON.parse(line)
+  } catch {
+    return
+  }
+  if (message.id === undefined) return // a notification
+  const id = message.id
+  const params = message.params ?? {}
+  switch (message.method) {
+    case 'initialize':
+      reply(id, {
+        protocolVersion: typeof params.protocolVersion === 'string' ? params.protocolVersion : '2025-06-18',
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: 'live-boot-probe', version: '0.0.0' },
+      })
+      return
+    case 'tools/list':
+      reply(id, {
+        tools: [
+          { name: 'probe_ping', description: 'Answer pong.', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } },
+          { name: 'probe_echo', description: 'Echo the arguments.', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } },
+        ],
+      })
+      return
+    case 'tools/call':
+      reply(id, { content: [{ type: 'text', text: 'pong' }], isError: false })
+      return
+    case 'resources/list':
+      reply(id, { resources: [] })
+      return
+    case 'resources/templates/list':
+      reply(id, { resourceTemplates: [] })
+      return
+    case 'prompts/list':
+      reply(id, { prompts: [] })
+      return
+    default:
+      send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'method not found: ' + String(message.method) } })
+  }
+})
+
+// The app closes this pipe when it disposes the client, so this also covers a
+// child that is killed: EOF on stdin ends the fake server with it.
+lines.on('close', () => process.exit(0))
+`
+
+/** A JSON string is a valid YAML double-quoted scalar; paths stay escaped. */
+function yamlString(value) {
+  return JSON.stringify(String(value))
+}
 
 /**
  * Mirror of the platform's trust fence, used only by the fallback server.
@@ -199,12 +329,45 @@ async function prepareProfile(home) {
   }
   await fsp.writeFile(path.join(profileDir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
   await fsp.writeFile(path.join(profileDir, 'cordis.yml'), '# dsh profile root — an empty entry list.\n[]\n', 'utf8')
-  // The profile's own user layer: the row the plugin's bundle patch inserts.
-  await fsp.writeFile(
-    path.join(profileDir, 'cordis.patch.yml'),
-    '# profile user patch layer\n- id: mcp-progressive\n  config: {}\n',
-    'utf8',
-  )
+  // The fake MCP server the `mcp-probe-ok` row spawns. It lives in the
+  // throw-away home, speaks stdio only, and dies when the app closes its pipe.
+  const fakeServer = path.join(home, 'fake-mcp-server.mjs')
+  await fsp.writeFile(fakeServer, MINI_MCP_SERVER_SOURCE, 'utf8')
+  // The profile's own user layer: the row the plugin's bundle patch inserts,
+  // then the two real `dsh-mcp-client` rows the live-status probes need. The
+  // client resolves its bare module name against the installed runtime, so the
+  // row is the same shape a user's home patch uses.
+  const patchRows = [
+    '# profile user patch layer',
+    '- id: mcp-progressive',
+    '  config: {}',
+    // A new row is an `insert` patch entry, exactly like a user's home patch
+    // declaring an MCP server; the bare module name resolves against the
+    // installed runtime's package scope.
+    '- insert:',
+    `    - id: ${MCP_ROW_BROKEN}`,
+    "      name: '@deepseek-ai/dsh-mcp-client'",
+    '      config:',
+    `        serverName: ${MCP_SERVER_BROKEN}`,
+    '        transport: stdio',
+    `        command: ${yamlString(BROKEN_COMMAND)}`,
+    '        args: []',
+    '        reconnect: { enabled: true, initialDelayMs: 25, maxDelayMs: 50, maxAttempts: 2 }',
+    '        startupTimeoutMs: 2000',
+    '- insert:',
+    `    - id: ${MCP_ROW_OK}`,
+    "      name: '@deepseek-ai/dsh-mcp-client'",
+    '      config:',
+    `        serverName: ${MCP_SERVER_OK}`,
+    '        transport: stdio',
+    `        command: ${yamlString(process.execPath)}`,
+    '        args:',
+    `          - ${yamlString(fakeServer)}`,
+    '        reconnect: { enabled: true, initialDelayMs: 25, maxDelayMs: 50, maxAttempts: 2 }',
+    '        startupTimeoutMs: 10000',
+    '',
+  ]
+  await fsp.writeFile(path.join(profileDir, 'cordis.patch.yml'), patchRows.join('\n'), 'utf8')
   await fsp.writeFile(
     path.join(profileDir, 'pnpm-workspace.yaml'),
     'packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n',
@@ -389,12 +552,85 @@ function evaluate(entry, spec) {
       reasons.push('body is not the JSON {ok:false,error} refusal')
     }
   }
+  if (spec.row !== undefined) {
+    const servers = Array.isArray(entry.body?.servers) ? entry.body.servers : []
+    const want = spec.row
+    const row = servers.find((candidate) => candidate?.serverName === want.serverName)
+    if (row === undefined) {
+      const observed = servers.map((candidate) => candidate?.serverName ?? '?').join(', ')
+      reasons.push(
+        `no /state row for server ${JSON.stringify(want.serverName)} (rows: ${observed === '' ? '<none>' : observed})`,
+      )
+    } else {
+      if (row.status !== want.status) {
+        reasons.push(`row status ${JSON.stringify(row.status ?? null)} != ${JSON.stringify(want.status)}`)
+      }
+      if (row.live?.state !== want.liveState) {
+        reasons.push(`row live.state ${JSON.stringify(row.live?.state ?? null)} != ${JSON.stringify(want.liveState)}`)
+      }
+      if (want.detailIncludes !== undefined && !String(row.statusDetail ?? '').includes(want.detailIncludes)) {
+        reasons.push(
+          `row statusDetail ${JSON.stringify(row.statusDetail ?? null)} does not contain ${JSON.stringify(want.detailIncludes)}`,
+        )
+      }
+      if (want.detailNull === true && !(row.statusDetail === null || row.statusDetail === undefined)) {
+        reasons.push(`row statusDetail should be null, got ${JSON.stringify(row.statusDetail)}`)
+      }
+      if (want.toolCountAtLeast !== undefined) {
+        const count = row.live?.toolCount
+        if (!(typeof count === 'number' && count >= want.toolCountAtLeast)) {
+          reasons.push(`row live.toolCount ${JSON.stringify(count ?? null)} < ${want.toolCountAtLeast}`)
+        }
+      }
+    }
+  }
   return { ok: reasons.length === 0, reasons }
 }
 
 /** A compact label for an expectation's status. */
 function expectedLabel(spec) {
   return (spec.accept ?? [spec.status]).join('|')
+}
+
+/** The `/state` row a live probe is about, as observed (for the printed report). */
+function observedRow(entry, serverName) {
+  const servers = Array.isArray(entry?.body?.servers) ? entry.body.servers : []
+  const row = servers.find((candidate) => candidate?.serverName === serverName)
+  if (row === undefined) return null
+  return {
+    serverName: row.serverName,
+    status: row.status,
+    fiberPhase: row.fiberPhase ?? null,
+    enabled: row.enabled ?? null,
+    live: row.live ?? null,
+    toolCount: row.toolCount ?? null,
+    statusDetail: row.statusDetail ?? null,
+    diagnostic: row.diagnostic ?? null,
+  }
+}
+
+/**
+ * Wait until every named row publishes the wanted live state.
+ *
+ * The rows start asynchronously (a spawn failure burns its reconnect budget,
+ * a real server has to answer `initialize`), so reading immediately after the
+ * cookie is minted would make the gate a race. Only the live states are
+ * waited for; the probes themselves still re-read `/state` and do the
+ * asserting, so a row that settles late fails loudly instead of being skipped.
+ */
+async function waitForLiveRows(origin, cookie, wanted, timeoutMs = LIVE_SETTLE_MS) {
+  const started = Date.now()
+  const deadline = started + timeoutMs
+  while (Date.now() < deadline) {
+    const answer = await httpProbe('state-live-wait', origin, ROUTE_STATE, { cookie })
+    const servers = Array.isArray(answer.body?.servers) ? answer.body.servers : []
+    const settled = wanted.every((want) =>
+      servers.some((row) => row?.serverName === want.serverName && row.live?.state === want.state),
+    )
+    if (settled) return { settled: true, waitedMs: Date.now() - started }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  return { settled: false, waitedMs: Date.now() - started }
 }
 
 async function main() {
@@ -437,8 +673,11 @@ async function main() {
 
     const origin = server.origin
     const cookie = result.cookie
-    const state = '/dsh-mcp-hub/state'
+    const state = ROUTE_STATE
     const toggle = '/dsh-mcp-hub/toggle'
+    // The two live probes only mean something against a real boot with the
+    // loader rows declared above; every other mode reports them as skips.
+    const liveProbes = expectation === 'fixed' && result.mode === 'real-dsh-web'
 
     const before = snapshotPatches(patchPaths)
     const answers = [
@@ -470,6 +709,14 @@ async function main() {
       await httpProbe('state-wrong-method', origin, state, { method: 'POST', cookie }),
       await httpProbe('state-authenticated', origin, state, { cookie }),
     ]
+    if (liveProbes) {
+      result.liveWait = await waitForLiveRows(origin, cookie, [
+        { serverName: MCP_SERVER_BROKEN, state: 'failed' },
+        { serverName: MCP_SERVER_OK, state: 'connected' },
+      ])
+      answers.push(await httpProbe('state-live-broken', origin, state, { cookie }))
+      answers.push(await httpProbe('state-live-connected', origin, state, { cookie }))
+    }
     const after = snapshotPatches(patchPaths)
 
     result.patchFiles = patchPaths
@@ -478,6 +725,9 @@ async function main() {
     const expected = EXPECTATIONS[expectation]
     result.probes = answers.map((entry) => {
       const spec = expected[entry.name]
+      if (spec.skip !== undefined) {
+        return { name: entry.name, skipped: true, reason: spec.skip }
+      }
       const verdict = evaluate(entry, spec)
       return {
         name: entry.name,
@@ -488,11 +738,27 @@ async function main() {
         error: entry.error,
         expected: expectedLabel(spec),
         accepted: spec.accept !== undefined && spec.accept.includes(entry.status) ? entry.status : undefined,
+        row: spec.row === undefined ? undefined : observedRow(entry, spec.row.serverName),
         ok: verdict.ok,
         reasons: verdict.reasons,
       }
     })
-    result.ok = result.probes.every((entry) => entry.ok) && result.patchesUnchanged
+    const answered = new Set(answers.map((entry) => entry.name))
+    for (const name of Object.keys(expected)) {
+      if (answered.has(name)) continue
+      const spec = expected[name]
+      result.probes.push({
+        name,
+        skipped: true,
+        reason:
+          spec.skip ??
+          (result.mode !== 'real-dsh-web'
+            ? 'fallback mode mounts the handler env, which has no real Loader row to carry a live status'
+            : 'not probed in this mode'),
+      })
+    }
+    result.skipped = result.probes.filter((entry) => entry.skipped === true).length
+    result.ok = result.probes.every((entry) => entry.skipped === true || entry.ok) && result.patchesUnchanged
   } catch (error) {
     result.error = error?.message ?? String(error)
     result.stack = error?.stack
@@ -527,10 +793,20 @@ async function main() {
     }
     if (result.error !== undefined) console.log(`  ERROR: ${result.error}\n`)
     for (const entry of result.probes) {
+      if (entry.skipped === true) {
+        console.log(`  skip  ${entry.name.padEnd(24)} ${entry.reason}`)
+        continue
+      }
       const accepted = entry.accepted !== undefined ? ` (admitted by ${entry.accepted})` : ''
       console.log(
         `  ${entry.ok ? 'ok  ' : 'FAIL'}  ${entry.name.padEnd(24)} status=${String(entry.status).padEnd(4)} expected=${entry.expected}${accepted}`,
       )
+      if (entry.row !== undefined && entry.row !== null) {
+        console.log(
+          `        row: status=${entry.row.status} fiberPhase=${entry.row.fiberPhase ?? '-'} live=${JSON.stringify(entry.row.live)} toolCount=${entry.row.toolCount ?? '-'} statusDetail=${JSON.stringify(entry.row.statusDetail)}`,
+        )
+      }
+      if (entry.row === null) console.log(`        row: <absent from /state>`)
       for (const reason of entry.ok ? [] : entry.reasons) console.log(`        ${reason}`)
       if (!entry.ok) {
         console.log(
@@ -541,6 +817,11 @@ async function main() {
         console.log(`        body: ${String(body ?? '').slice(0, 240)}`)
         if (entry.error !== undefined) console.log(`        error: ${entry.error}`)
       }
+    }
+    if (result.liveWait !== undefined) {
+      console.log(
+        `\n  live rows settled: ${result.liveWait.settled ? 'yes' : 'NO'} (waited ${result.liveWait.waitedMs} ms)`,
+      )
     }
     if (result.patchesUnchanged === false) {
       console.log('\n  FAIL  a rejected toggle mutated a patch file (snapshot differs)')
