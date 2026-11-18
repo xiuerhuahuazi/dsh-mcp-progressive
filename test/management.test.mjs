@@ -1050,3 +1050,52 @@ test('F8: readJsonBody rejects with an AbortError on a premature close', async (
   req.emit('close')
   await assert.rejects(reading, (error) => error?.name === 'AbortError')
 })
+
+test('F1b: a timed-out stop during restart restores the preference and reports the rollback', async (t) => {
+  const env = await createManagementEnv({ rows: [row({ enabled: true, fiberPhase: 'active', readOnlyReason: 'unaddressable' })] })
+  t.after(() => env.dispose())
+  const homePatch = nodePath.join(env.home, 'cordis.patch.yml')
+  fs.writeFileSync(
+    homePatch,
+    '- insert:\n    - id: demo\n      name: "@deepseek-ai/dsh-mcp-client"\n      config:\n        serverName: demo\n        command: node\n',
+    'utf8',
+  )
+
+  const started = Date.now()
+  // The row never unloads, so the stop waits until its 30 s phase deadline; the
+  // virtual clock reaches that deadline without a live 30 s wait.
+  const response = await withVirtualClock(10_000, () => post(env, RESTART, { entryId: 'include:demo' }))
+  const elapsed = Date.now() - started
+
+  assert.equal(response.status, 500)
+  assert.equal(response.body.ok, false)
+  assert.match(response.body.error, /restart failed/)
+  assert.match(response.body.error, /timed out waiting/)
+  assert.equal(response.body.rollback, 'preference-restored')
+  const rewritten = parse(fs.readFileSync(homePatch, 'utf8'))
+  assert.equal(rewritten.find((entry) => entry?.id === 'demo')?.disabled, false, 'the patch must not stay disabled: true')
+  assert.equal(env.calls.length, 0)
+  assert.ok(elapsed < 10_000, `the virtual clock must reach the deadline quickly (took ${elapsed} ms)`)
+})
+
+test('F1b: a failed restart of an already-disabled server performs no rollback write', async (t) => {
+  const env = await createManagementEnv({ rows: [row({ enabled: false, fiberPhase: null, readOnlyReason: 'unaddressable' })] })
+  t.after(() => env.dispose())
+  const homePatch = nodePath.join(env.home, 'cordis.patch.yml')
+  fs.writeFileSync(
+    homePatch,
+    '- insert:\n    - id: demo\n      name: "@deepseek-ai/dsh-mcp-client"\n      config:\n        serverName: demo\n        command: node\n- id: demo\n  disabled: true\n',
+    'utf8',
+  )
+
+  const response = await withVirtualClock(10_000, () => post(env, RESTART, { entryId: 'include:demo' }))
+
+  assert.equal(response.status, 500)
+  assert.match(response.body.error, /restart failed/)
+  // Nothing was stopped, so there is no pre-restart "enabled" preference to
+  // restore: the start's own write stands and the body carries no rollback.
+  assert.equal(response.body.rollback, null)
+  const rewritten = parse(fs.readFileSync(homePatch, 'utf8'))
+  assert.equal(rewritten.find((entry) => entry?.id === 'demo')?.disabled, false)
+  assert.equal(env.calls.length, 0)
+})
