@@ -1,0 +1,35 @@
+name: test
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # The plugin declares `yaml` as its only dependency; nothing else is
+      # installed and nothing reaches the network at test time.
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      # The runtime-dependent cases (real Cordis + real dsh-tools) skip
+      # themselves when the unpacked DSH runtime is absent, which it is on CI.
+      - name: Run the test suite
+        run: npm test
+
+      - name: Show the Node version
+        run: node --version
