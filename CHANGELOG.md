@@ -24,7 +24,9 @@ Security:
 - `mcp_server` start/stop/restart (the model tool only) asks the platform
   approval pipeline before mutating a server row; without an approval service
   the platform denies it instead of running it. The browser panel stays
-  ungated: a human clicking is the consent.
+  ungated: a human clicking is the consent. The ask's `displayReason` is a
+  `{ en, zh }` locale record, as the platform contract declares, not a bare
+  string.
 - Server target descriptions no longer echo command-line argument values or a
   malformed URL: stdio rows print the executable name plus flag names only,
   and an unparseable URL becomes `(invalid URL)`.
@@ -32,6 +34,9 @@ Security:
   effective `disabled` before a byte is written, so quoted keys, flow
   documents, indented roots, multi-line scalars and document end markers can no
   longer produce an unparseable patch file.
+- A BOM-prefixed patch file, which the platform's `js-yaml` accepts, is now
+  parsed and rewritten too, and the BOM byte prefix is preserved (before this,
+  such a row could not be toggled and its file was left untouched).
 - Patch writes go through an exclusive random-suffix temporary file renamed
   over the target, keep the existing mode (0600 for a new file), follow a
   symlinked dotfile instead of replacing it, require a written 0600
@@ -48,8 +53,15 @@ Fixed:
   preference, and the remaining `application` outcomes are handled exhaustively
   (`restart-required`, `overridden` → 409, `failed`/`cancelled` keep the
   manager diagnostic) with no blind patch fallback.
-- Manager calls and phase waits are bounded and cancellable by the request, and
-  the control queue refuses a growing backlog with `429`.
+- An abort during `restart` (the panel aborts at its 10 s deadline) now restores
+  the pre-restart preference on a fresh, non-aborted bounded budget and reports
+  `rollback` in the response, so the stop's persisted `disabled: true` can no
+  longer survive the interrupted request.
+- Manager calls take the earlier of the operation deadline and a per-call 5 s
+  budget, and the 30 s operation budget starts when the task reaches the head of
+  the queue rather than when it joined it; phase waits are bounded and
+  cancellable by the request, and the control queue refuses a growing backlog
+  with `429`.
 - Server lookup addresses one row exactly (`entryId` → `id` → name, with the
   panel sending `entryId`); an ambiguous identifier returns candidates instead
   of toggling a different server. Module identity is exact, not a prefix.
@@ -64,17 +76,29 @@ Fixed:
 - Per-agent disclosure state is keyed by Agent object identity (`WeakMap`) so
   two agents sharing an id cannot share a mask, and the prompt-assembly safety
   net retries a restriction that was never installed (`masked`) instead of
-  trusting existing state. `warnOnce` is per `(kind, agent)`.
+  trusting existing state. `warnOnce` is also keyed by the Agent object, so two
+  agents that share an id cannot silence each other's warnings.
 - `mcp_call` returns the MCP server's error text instead of a bare thrown
-  message, forwards deferred context and turn conclusion, detects a PTC
-  refusal from the result, records the nested dispatch via the session log when
-  the current step is readable (audit line otherwise), and skips the transient
-  shadow for an `alwaysVisible` target.
+  message, forwards deferred context and turn conclusion, and detects a PTC
+  refusal from the result. It writes **no** session events for the nested call:
+  the earlier synthetic `tool/call` + `tool/result` pair left an orphan tool
+  message in a real session history (no assistant message declares the call) and
+  made the next DeepSeek request fail with `INVALID_REQUEST` ("tool result has
+  no matching call"). The audit trail is now always an in-result line
+  (`(audit: dispatched <tool>; argument keys: …)`), kept next to the
+  empty-output fallback sentence, and an `alwaysVisible` target needs no
+  transient shadow.
 - Corrective unknown-tool text distinguishes "registered but not loaded in this
   conversation" from "not in this MCP catalog right now".
-- `mcp_load` refuses a tool loaded in the same step with next-step guidance,
-  distinguishes an already-native tool from a booked-but-not-visible one, and
-  names the `unload:true` recovery path.
+- The corrective `tools/pre-execute` handler (not `mcp_load`) refuses a call to
+  a tool loaded in the same step with next-step guidance; `mcp_load` itself
+  succeeds there, and it distinguishes an already-native tool from a
+  booked-but-not-visible one and names the `unload:true` recovery path.
+- Successful control operations re-read the live row, so `observedStatus` counts
+  the post-operation tool catalog instead of the pre-operation snapshot (a
+  just-started server reads `running`, not `idle`); `readJsonBody` rejects with
+  an `AbortError` when the client disconnects mid-body instead of leaving the
+  handler pending.
 - The client panel keeps an action error until the next action, discards stale
   responses by request generation, aborts hung requests on a deadline and on
   unmount, uses a `Map` for pending rows (ids such as `constructor` work),
@@ -86,12 +110,12 @@ Changed:
 
 - The Host half is split into `lib/patch.js`, `lib/search.js` and
   `lib/management.js`; the pure helpers are exported through `__test` and
-  covered by a `node --test` suite (152 tests, CI on Node 22 and 24).
+  covered by a `node --test` suite (164 tests, CI on Node 22 and 24).
 - The plugin declares one runtime dependency, `yaml` `^2.9.1`, for the patch
   rewrite.
 - The management half activates only where `pluginManager`, `profileContext`,
-  `webServer` and `loader` exist; headless profiles keep the disclosure half
-  only.
+  `webServer`, `loader` and the Host `connection` service exist; headless
+  profiles keep the disclosure half only.
 - Server state adds `entryId`, `diagnostic` and a `stopping` status.
 - `eagerTools` applies to the root agent only; subagents start with an empty
   loaded set.
@@ -103,14 +127,21 @@ Changed:
   / `scripts/live-boot.mjs`, and the deferred items below.
 - `docs/fix-map.md` and `docs/security.md` record the review-item → fix → test
   mapping and the management security contract.
+- The suite gained a real-`dsh-session` regression for the nested `mcp_call`
+  dispatch (no orphan tool result, no synthetic nested events) and regressions
+  for the independent-audit findings, so the history-integrity bug cannot come
+  back unnoticed.
 
 Deferred:
 
 - P2-4: `mcp_servers` still does not report hidden/leaked counts; that needs
   disclosure state private to the Host half, so a failed mask remains visible
   only in the log.
-- No cross-process file lock: patch writes are compare-and-swap with stale
-  detection and retries, not coordinated with `plugin_manager`'s pnpm writes.
+- No cross-process file lock: patch writes are compare-and-swap with three
+  attempts, not coordinated with `plugin_manager`'s pnpm writes. This is the one
+  documented audit residual (security audit F5): with more than two concurrent
+  writers an edit can fail visibly with `PATCH_STALE`; the file is never
+  corrupted and the loss is never silent.
 - A nested `mcp_call` error survives as text in a successful outer result, and
   the nested tool's presentation `meta` is not forwarded.
 - Server status stays an inference from loader rows/diagnostics and registered

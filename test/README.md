@@ -13,7 +13,7 @@ Four artefacts live here:
 
 ```sh
 npm install --no-audit --no-fund     # once; the only dependency is `yaml`
-npm test                             # the suite (152 tests; CI's gate)
+npm test                             # the suite (164 tests; CI's gate)
 
 node scripts/repro-review.mjs        # review-defect gate: exit 0 = no reviewed defect reproduces
 node scripts/repro-review.mjs --json # the same, machine readable
@@ -29,9 +29,9 @@ The three real-catalog schema cases are optional and private: point
 
 | Posture | `npm test` |
 | --- | --- |
-| unpacked runtime present, `MCP_REVIEW_CATALOG` unset (default local) | 152 tests, 149 pass / 3 skip / 0 fail |
-| unpacked runtime present, `MCP_REVIEW_CATALOG` set | 152 tests, 152 pass / 0 skip / 0 fail |
-| CI: no runtime, no catalog | 152 tests, 132 pass / 20 skip / 0 fail |
+| unpacked runtime present, `MCP_REVIEW_CATALOG` unset (default local) | 164 tests, 161 pass / 3 skip / 0 fail |
+| unpacked runtime present, `MCP_REVIEW_CATALOG` set | 164 tests, 164 pass / 0 skip / 0 fail |
+| CI: no runtime, no catalog | 164 tests, 144 pass / 20 skip / 0 fail |
 
 `npm test` is the gate CI runs. The two scripts are release gates run locally: one needs
 the unpacked DSH runtime for its YAML family, the other boots a real server, so neither
@@ -113,7 +113,12 @@ contract behind a stub fence, not the platform wiring.
   `root.tools.schemas(agent)` for that agent, still present in the global registry, and the
   five meta/management tools are registered;
 * **with the real DSH runtime**: `mcp_call` dispatches the hidden tool through
-  `ctx.tools.execute` exactly once and returns its output.
+  `ctx.tools.execute` exactly once and returns its output;
+* **with the real DSH runtime**: `mcp_call` leaves a real `dsh-session` history with no
+  orphan tool result — it writes no nested `tool/call`/`tool/result` events (an unpaired
+  `tool/result` would make the next provider request fail), and the target/target-argument
+  audit line is always in the result instead. A second case keeps the empty-output
+  fallback sentence next to that audit line.
 
 ## The three worlds in `test/harness.mjs`
 
@@ -154,8 +159,8 @@ CI has no DSH runtime, so:
 
 * 17 runtime-dependent cases call `t.skip()` when `hasRuntime()` is false, and the 3
   real-catalog schema cases skip unless `MCP_REVIEW_CATALOG` names a local copy of the
-  private review catalog. Locally with the runtime present that is 149 pass / 3 skip
-  (152 pass / 0 skip with the variable set); on CI, which has neither, it is 132 pass /
+  private review catalog. Locally with the runtime present that is 161 pass / 3 skip
+  (164 pass / 0 skip with the variable set); on CI, which has neither, it is 144 pass /
   20 skip.
 * `scripts/repro-review.mjs` is not part of `npm test`; its YAML family also skips when the
   DSH runtime is absent, and the script is a release gate, not a suite case.

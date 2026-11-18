@@ -47,7 +47,9 @@ Every handler runs the same sequence, and each step answers before any state is 
    cross-site `fetch` cannot declare JSON without a preflight, so the media type is part
    of the admission gate in front of the mutation path.
 4. **Body** — `readJsonBody` (max 64 KiB, `413`; drained so the client receives the
-   status instead of a reset) then, in order:
+   status instead of a reset; a client that disconnects mid-body rejects with an
+   `AbortError` on `close`/`aborted`, so the handler cannot stay pending forever) then,
+   in order:
    `validateBodyObject` (JSON object, not array/primitive), `validateAddressing`
    (`entryId`/`id`/`server`, when present, must be non-empty strings; at least one must
    be present), `validateEnabled` (`enabled` must be a real boolean — `"true"`, `null`,
@@ -55,8 +57,14 @@ Every handler runs the same sequence, and each step answers before any state is 
    lookup or queue entry.
 5. **Operation** — serialized in one process-wide queue. The addressed row is resolved
    from live state inside the task; 16 waiting operations maximum (`429` beyond that).
-   Manager calls are bounded at 5 s (`504` on a stall) and a phase wait at 30 s (`500`
-   with the observed state). The request's `close`/`aborted` events abort the wait.
+   Each manager call is bounded by the earlier of a per-call 5 s budget and the operation
+   deadline, and the 30 s operation budget starts when the task reaches the head of the
+   queue (not when it joined it). A stalled inventory/phase read (`listPlugins`) answers
+   `504`; a stalled enable write (`setPluginEnabled`) surfaces as `500` carrying the
+   manager diagnostic. A phase wait times out at 30 s with `500` and the observed state.
+   The request's `close`/`aborted` events abort the wait (and a `restart` interrupted by
+   an abort restores the pre-restart preference on a fresh, non-aborted signal and
+   reports `rollback`).
 
 JSON answers always carry `content-type: application/json; charset=utf-8`,
 `cache-control: no-store` and an explicit `content-length`. Error payloads add
@@ -71,9 +79,10 @@ A parse error never repeats request bytes, because a caller could put a secret t
 - Module identity is `@deepseek-ai/dsh-mcp-client` or a subpath of it — never a prefix
   match, so `…-client-extra` is not treated as an MCP server.
 - `targetSummary` never carries a credential: stdio rows print the executable basename
-  plus up to four flag **names** (`--token=SECRET` → `--token`, `-pSECRET` → `-p`), and
-  a URL that cannot be parsed becomes `(invalid URL)`; a valid URL prints only `.host`
-  (topology, not a secret).
+  plus up to four flag **names** (`--token=SECRET` → `--token`; a value attached to a
+  short option such as `-pSECRET` is omitted entirely, not shortened), and a URL that
+  cannot be parsed becomes `(invalid URL)`; a valid URL prints only `.host` (topology,
+  not a secret).
 
 ## 4. File writes
 
@@ -82,6 +91,8 @@ A home-patch row is toggled by writing `~/.dsh/cordis.patch.yml`
 (`lib/patch.js`):
 
 - edit on the YAML AST (`yaml`), preserving comments, CRLF style and insert groups;
+  a platform-valid leading BOM is stripped for the AST and re-emitted on write, so a
+  BOM-prefixed file is togglable and keeps its byte prefix;
 - re-parse and verify the composition before writing: top-level entries and every
   insert group unchanged, and the target id's effective `disabled` equal to the
   requested value, otherwise throw and leave the bytes untouched;
@@ -104,7 +115,9 @@ outcomes are exhaustive, `failed`/`cancelled` throw with the manager's diagnosti
 
 `mcp_server` start/stop/restart returns `{ kind: 'ask', reason, displayReason }` from a
 `tools/pre-execute` handler, so every model-initiated mutation goes through the platform
-approval pipeline (`plugin_manager` follows the same pattern). `mcp_servers` and all
+approval pipeline (`plugin_manager` follows the same pattern). `reason` is the audited
+plain string; `displayReason` is the `{ en, zh }` locale record the platform contract
+declares, so a consumer reading `.en` finds text. `mcp_servers` and all
 browser routes are not gated: a human clicking the panel is the consent. If the host has
 no approval service, the platform denies the ask rather than running it (verified in the
 unpacked runtime: `dsh-tools/lib/pipeline.js` → `serviceAsk` returns an approval denial
@@ -175,8 +188,12 @@ the Host/Origin fence (`403`) or, once the Host is accepted, for the missing aut
 peer (`401`); both are the platform's verdict and the plugin passes them through. The gate
 also requires the two patch layers to be byte-identical afterwards — every rejected probe
 changed nothing — and it asserts the JSON refusal shape (`{ok:false,error}`) instead of a
-body-less reset. `--expect baseline` documents the 1.2.0 matrix and only matches a v1.2.0
-checkout. Without the unpacked runtime the script falls back to an in-process HTTP server
+body-less reset. The gate is a **rejection matrix**: it never performs a valid
+authenticated toggle, so it proves the admission/validation boundary rather than the
+write path; a valid toggle against the fake environment is covered by
+`scripts/repro-review.mjs` probe C, and the audit's own live valid-toggle probe confirmed
+the home-patch write path separately. `--expect baseline` documents the 1.2.0 matrix and
+only matches a v1.2.0 checkout. Without the unpacked runtime the script falls back to an in-process HTTP server
 behind a stub fence and reports `mode: fallback-http`, `platformAuthority: false` — the
 handler contract, not the platform wiring.
 
@@ -199,14 +216,43 @@ baseline modes pass and the fixed modes fail, and on this release the reverse.
 
 The real-runtime smoke fixture that previously lacked a Host `connection` service is fixed in
 `02fe061`: `mountPlugin()` now provides it (and `mountPlugin({ connection: false })` models a
-host without it). With the runtime present `npm test` is 149 pass / 3 skip / 0 fail (the three
-optional real-catalog cases skip unless `MCP_REVIEW_CATALOG` points at a local copy of the
-review catalog, which makes it 152 pass / 0 skip), and on CI — no runtime, no catalog — it is
-132 pass / 20 skip / 0 fail.
+host without it). With the runtime present `npm test` is 164 tests, 161 pass / 3 skip /
+0 fail (the three optional real-catalog cases skip unless `MCP_REVIEW_CATALOG` points at a
+local copy of the review catalog, which makes it 164 pass / 0 skip), and on CI — no runtime,
+no catalog — it is 164 tests, 144 pass / 20 skip / 0 fail.
+
+### 7.4 Independent audits (2026-11-19)
+
+Two adversarial audits of this candidate (`audit-security.md`, `audit-core-docs.md`) shaped
+the final code:
+
+- The **security audit** verdict was **ship-with-notes**: no authentication bypass (fence
+  verdicts `401`/`403`/`503`, admission strictly before method/content-type/body), no path,
+  method or header bypass, no way to make the plugin write an invalid patch, no
+  credential/argv/invalid-URL leak, and no injection sink in the client. Its F1–F4 and
+  F6–F8 were fixed in this release; F5 (no cross-process lock, visible `PATCH_STALE` under
+  more than two concurrent writers) remains the one documented residual, and F9 was a doc
+  nit.
+- The **core audit** verdict at review time was **do-not-ship** because of its F1: the
+  `mcp_call` nested-event logging left an orphan tool message and made the next DeepSeek
+  request fail with `INVALID_REQUEST`. That logging is removed (no session events; the
+  audit line is in the result), the real-`dsh-session` regression now locks the history
+  invariant, and the audit's doc/limitation findings (F2/F3/F6/F8) are reflected in this
+  document and the README. F4 is partially addressed (one real `Session` test; the
+  Agent/SystemPrompt seams are still stubbed) and F7 is recorded as the live-boot gate's
+  coverage boundary in §7.1.
+
+Final postures on this tree: `npm test` 164 tests — 161 pass / 3 skip / 0 fail locally,
+164 pass / 0 skip with `MCP_REVIEW_CATALOG`, 144 pass / 20 skip / 0 fail on a runtime-less
+CI; `node scripts/repro-review.mjs` PASS `0/6`; `node scripts/live-boot.mjs` PASS `9/9`
+(real boot).
 
 ## 8. Residual risks / deferred
 
-- No cross-process file lock (see §4): compare-and-swap only.
+- No cross-process file lock (see §4): compare-and-swap with three attempts only. This is
+  the one documented audit residual (security audit F5): with more than two concurrent
+  writers (e.g. two DSH windows on one home) an edit can exhaust its attempts and fail as a
+  visible `PATCH_STALE` `500`; the file is never corrupted and the loss is never silent.
 - The fence comes from the Host `connection` service, and the management half only
   activates while that service exists. A recomposition can leave the routes mounted for a
   moment without the service; they then answer `503` and change nothing.

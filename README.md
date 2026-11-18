@@ -23,7 +23,8 @@ agent's registry view:
 1. Hiding happens in the registry view, not in the prompt: a per-agent scope restriction
    (`agent.ctx.tools.restrict({ deny })`) removes the unloaded schemas from `schemas(agent)` —
    the exact list the prompt provider reads — and from `get`/`executable`, so a hidden tool is
-   neither in the prompt nor callable directly.
+   neither in the prompt nor callable directly. The catalog is read from the **global** registry;
+   MCP tools mounted only inside an agent or preset scope are outside it (see Limitations).
 2. Loading re-registers the selected definitions inside the agent's own scope, which a
    restriction leaves visible. The deny list is therefore never rebuilt for a load: it changes
    only when the catalog changes (a server connects or disconnects), while a load or unload is
@@ -57,18 +58,23 @@ agent's registry view:
 6. A guessed-but-unavailable `mcp__*` call gets a corrective message instead of a bare
    unknown-tool error, and the text distinguishes "registered but not loaded in this
    conversation" from "not in this MCP catalog right now".
-7. `mcp_load` reports three different states honestly: loaded-and-native ("already loaded: it is
-   a native tool in this conversation; call it directly"), loaded-but-not-visible (a failed
-   shadow registration — "pass it with `unload:true`, then load it again"), and a same-step
-   mistake ("loaded in this step; call it in the next step — do not batch `mcp_load` with the
-   call").
+7. `mcp_load` reports two states of an already-booked tool honestly: loaded-and-native
+   ("already loaded: it is a native tool in this conversation; call it directly") and
+   loaded-but-not-visible (a failed shadow registration — "pass it with `unload:true`, then load
+   it again"). A separate same-step mistake is answered by the corrective `tools/pre-execute`
+   handler, not by `mcp_load`: calling a tool that was loaded in the same step returns "loaded in
+   this step; call it in the next step — do not batch `mcp_load` with the call" while the
+   `mcp_load` itself succeeded.
 8. `mcp_call` dispatches through `ctx.tools.execute`, so it runs the full pre-execute pipeline
    (guards, policy, approval, timeout). It returns the MCP server's own error text instead of a
-   bare thrown message, forwards deferred context and turn conclusion, detects a PTC refusal
-   from the result, and records the nested `tool/call`/`tool/result` in the session log when the
-   current step is readable (otherwise it appends an audit line naming the target and its
-   argument keys). Its transient scope registration is removed afterwards, and an
-   `alwaysVisible` target needs no registration at all.
+   bare thrown message, forwards deferred context and turn conclusion, and detects a PTC refusal
+   from the result. It writes **no** session events for the nested call: a synthetic
+   `tool/result` for a call no assistant message declares would leave an orphan tool message in
+   `session.deriveMessages()` and the next provider request would be rejected. The audit trail is
+   always an in-result line — `(audit: dispatched <tool>; argument keys: …)` — and the
+   empty-output fallback keeps `(<tool> completed with no output.)` next to it. Its transient
+   scope registration is removed afterwards, and an `alwaysVisible` target needs no
+   registration at all.
 9. One short prompt section advertises the catalog without listing any schema — up to four
    servers with counts and a pointer to `mcp_search`, roughly:
    `MCP catalog: rea (170 tools), bilibili (31), blender (9); not loaded by default — mcp_search to find one.`
@@ -130,8 +136,9 @@ The route contract is strict, because two of these routes can rewrite the compos
   non-empty string, and `enabled` must be a real boolean (`400`) — all before any lookup or
   queueing, so a malformed request can never stop a server;
 - an unknown row is `404`, an ambiguous name is `400` with candidates, an oversized body
-  (> 64 KiB) is `413`, and a stalled manager service is `504`. Answers are JSON with
-  `cache-control: no-store`.
+  (> 64 KiB) is `413`; a stalled inventory/phase read (`listPlugins`) is `504`, while a stalled
+  enable write (`setPluginEnabled`) surfaces as `500` carrying the manager diagnostic. Answers
+  are JSON with `cache-control: no-store`.
 
 Patch-file writes are a real transaction: the edit is made on the YAML AST, re-parsed and
 validated against the composition's effective `disabled` before a byte reaches the disk;
@@ -207,12 +214,14 @@ tools; tool arrays read back from recorded `request/header` entries):
 | | tools in request | of which MCP | tool-definition JSON | tokens |
 |---|---|---|---|---|
 | before | 351 | 294 | 864,556 chars | 268,154 |
-| after | 57 native + 3 meta | 0 | 48,671 chars | 15,096 |
+| after | ≈60 (incl. meta-tools) | 0 | ≈49–51k chars | ≈15.1–15.8k |
 
-That is 94.4 % less tool-definition payload on every request — 253,058 fewer prompt tokens per
-request. Two caveats: these are **one profile's capture, not a controlled experiment** (the two
-captures are not guaranteed to be the same catalog snapshot, and the difference could include
-server changes), and the token figures are derived from the recorded usage with the measured
+That is ≈94.1–94.4 % less tool-definition payload, or ≈252,000–253,000 fewer prompt tokens per
+request. The "after" endpoint is a range on purpose: the same review records **48,671 chars** in
+its synthesis and **50,832 chars (61 tools)** in its probe run, i.e. the two captures are not the
+same snapshot. Treat all of this as **one uncontrolled profile capture, not a benchmark** (the
+before/after rows may include server changes, and no derivation script or `request/header`
+snapshot is committed). The token figures are derived from the recorded usage with the measured
 ratio of **3.224 chars/token** for this block (a flat 4 chars/token would understate it by about
 24 %).
 
@@ -240,13 +249,13 @@ What follows from the formula:
 
 Everything runs locally with no network and no access to `~/.dsh`:
 
-- `npm test` — the suite in `test/` (`node --test`), **152** tests. With the unpacked DSH
+- `npm test` — the suite in `test/` (`node --test`), **164** tests. With the unpacked DSH
   runtime present (`$DSH_RUNTIME`, default `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`) it
-  is 149 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
-  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 152 pass
+  is 161 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
+  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 164 pass
   / 0 skip; the catalog is private and not committed). On CI (`.github/workflows/test.yml`,
   Node 22 and 24) neither the runtime nor that catalog exists, so the 17 runtime-dependent and
-  the 3 real-catalog cases skip: 132 pass / 20 skip / 0 fail.
+  the 3 real-catalog cases skip: 144 pass / 20 skip / 0 fail.
 - `node scripts/repro-review.mjs` — the review-defect **regression gate** (default
   `--expect fixed`). It replays the six defect families from the 2026-11-19 review and exits 0
   only when none of them reproduces; otherwise it prints `REGRESSION: <families>` and exits 1.
@@ -301,12 +310,15 @@ mapping is in [docs/fix-map.md](docs/fix-map.md).
 - Loaded tools stay in the tool array for the rest of the session; unloading changes the array
   again and pays another cache miss.
 - Disclosure bookkeeping is fail-open: if a scope or a registration is unavailable it logs one
-  warning per kind and agent and leaves the tool visible instead of failing a model request; the
+  warning per `(kind, Agent)` and leaves the tool visible instead of failing a model request; the
   prompt-assembly safety net retries a mask that was never installed.
 - PTC-presented agents (`tools: { mode: ptc }`, e.g. the shipped `preset-ptc`) read the same
   restricted view, so hiding and loaded tools are covered there too; `mcp_call` cannot dispatch
   a raw call in PTC mode and answers with guidance to `mcp_load` and call the tool inside
   `run_code`.
+- The catalog is read from the global registry view only: MCP tools mounted by an agent preset
+  or an agent scope are neither hidden nor searchable by `mcp_search` (a 1.3 candidate; the
+  disclosure restriction does not see them).
 - Non-MCP tools are never touched.
 
 ### License
@@ -332,7 +344,8 @@ MCP 工具的渐进披露：模型不必在每次请求里为每个 `mcp__*` 工
 1. 隐藏发生在注册表视图而不是 prompt：每个 agent 作用域上的一条 restriction
    （`agent.ctx.tools.restrict({ deny })`）把未装载的 schema 从 `schemas(agent)`
    （prompt provider 读取的正是这份）以及 `get`/`executable` 中移除，因此被隐藏的工具既不在
-   prompt 中，也无法被直接调用。
+   prompt 中，也无法被直接调用。目录读取的是**全局**注册表；只挂在 agent / preset 作用域里的
+   MCP 工具不在其中（见「限制」）。
 2. 装载会把选中的定义重新注册到该 agent 自己的作用域，作用域内注册不受 restriction 影响。
    因此装载**不会重建** deny 列表：deny 只在目录变化（某个服务器连上或断开）时改变，而真正
    改写请求工具数组的是装载/卸载（见[费用](#费用一次装载到底花多少)）。
@@ -358,14 +371,18 @@ MCP 工具的渐进披露：模型不必在每次请求里为每个 `mcp__*` 工
    打印签名、必填名和 `schema omitted: too large (N chars)`，绝不输出被截断的 JSON。
 6. 猜测调用未注册的 `mcp__*` 时返回纠正提示而不是裸的未知工具错误，并区分「已注册但本会话未装载」
    与「当前不在这个 MCP 目录里」。
-7. `mcp_load` 如实区分三种状态：已装载且原生（「already loaded: it is a native tool in this
-   conversation; call it directly」）、已装载但不可见（scope 注册失败——「pass it with
-   `unload:true`, then load it again」）、以及同一步装载+调用（「loaded in this step; call it in
-   the next step — do not batch `mcp_load` with the call」）。
+7. `mcp_load` 对「已登记」的两种状态如实区分：已装载且原生（「already loaded: it is a native
+   tool in this conversation; call it directly」）、已装载但不可见（scope 注册失败——「pass it
+   with `unload:true`, then load it again」）。另有一种「同一步装载+调用」的误用由纠正性的
+   `tools/pre-execute` 处理、而不是 `mcp_load`：调用本步刚装载的工具会返回「loaded in this
+   step; call it in the next step — do not batch `mcp_load` with the call」，而那次
+   `mcp_load` 本身是成功的。
 8. `mcp_call` 经 `ctx.tools.execute` 分发，因此走完整 pre-execute 管线（guards、策略、审批、超时）。
-   它返回 MCP 服务器自己的错误文本而不是裸的抛出消息，转发 deferred context 与结束回合信号，从
-   结果里识别 PTC 拒绝，并在当前步骤可读时把嵌套的 `tool/call`/`tool/result` 写入 session 日志
-   （否则在结果里附一行审计，说明目标与参数键名）。临时 scope 注册随后移除；
+   它返回 MCP 服务器自己的错误文本而不是裸的抛出消息，转发 deferred context 与结束回合信号，并从
+   结果里识别 PTC 拒绝。它为嵌套调用**不写任何 session 事件**：为一条没有任何 assistant 消息声明
+   的调用追加 `tool/result`，会在 `session.deriveMessages()` 里留下孤立的工具结果，下一次模型请求
+   会被拒绝。审计线索始终是结果里的一行——`(audit: dispatched <tool>; argument keys: …)`——空输出
+   回退还把 `(<tool> completed with no output.)` 保留在它旁边。临时 scope 注册随后移除；
    `alwaysVisible` 目标则完全不需要注册。
 9. 一段很短的 system-prompt 章节提示目录存在，但不列出任何 schema——最多四个服务器及计数，并指向
    `mcp_search`，大致是：
@@ -416,8 +433,9 @@ manager 的诊断而不是盲写补丁；restart 的启动步骤失败时会报�
   不带该头同样返回 `415`——面板始终发送 `application/json`；
 - body 必须是 JSON 对象，所有标识符（`entryId`、`id`、`server`）必须是非空字符串，`enabled`
   必须是真正的布尔值（否则 `400`）——全部在查找与入队之前校验，畸形请求不可能停掉服务器；
-- 未知行 `404`，歧义名称 `400` 并附候选，超过 64 KiB 的请求体 `413`，manager 服务卡死 `504`。
-  响应均为 JSON，`cache-control: no-store`。
+- 未知行 `404`，歧义名称 `400` 并附候选，超过 64 KiB 的请求体 `413`；卡住的目录/阶段读取
+  （`listPlugins`）返回 `504`，而卡住的启用写入（`setPluginEnabled`）以 `500` 冒泡并带 manager
+  诊断。响应均为 JSON，`cache-control: no-store`。
 
 补丁写入是真正的事务：在 YAML AST 上编辑，先重新解析并按组合后的有效 `disabled` 校验，通过后
 才落盘；保留注释、CRLF 风格与 insert 组；写入经独占随机后缀临时文件 rename 覆盖目标，保留原
@@ -470,11 +488,13 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
 | | 请求内工具 | 其中 MCP | 工具定义 JSON | token |
 |---|---|---|---|---|
 | 之前 | 351 | 294 | 864,556 字符 | 268,154 |
-| 之后 | 57 个原生 + 3 个元工具 | 0 | 48,671 字符 | 15,096 |
+| 之后 | ≈60（含元工具） | 0 | ≈4.9–5.1 万字符 | ≈1.51–1.58 万 |
 
-即每次请求工具定义体积 **−94.4%**、prompt **少 253,058 token**。两点保留：这是**一个 profile 的
-一次抓取，不是受控实验**（两次抓取不保证是同一份目录快照，差异也可能包含服务器增减）；token 数字是
-按记录用量与实测比值 **3.224 字符/token** 推出来的（按 4 字符/token 估算会低估约 24%）。
+即每次请求工具定义体积约 **−94.1%–−94.4%**、prompt **少约 25.2–25.3 万 token**。「之后」端点刻意写成
+区间：同一份评审在合成报告里记录 **48,671 字符**、在其探针运行里记录 **50,832 字符（61 个工具）**，
+两次抓取并非同一快照。请把这些数字当作**一次未受控的 profile 抓取，而不是基准测试**（前后两行可能
+混入服务器增减；仓库里也没有提交推导脚本或 `request/header` 快照）。token 数字按记录用量与实测比值
+**3.224 字符/token** 推算（按 4 字符/token 估算会低估约 24%）。
 
 费用就是同一公式套价格。某 profile 实测一次较晚的 `mcp_load` 约 **0.45 元**（近似全量缓存未命中；
 同一快照里被移除工具块的缓存命中节省约 **0.010 元/请求**）。这只是一个例子，不是预算：与它一起
@@ -495,12 +515,12 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
 
 全部本地运行，不联网、不读写 `~/.dsh`：
 
-- `npm test`——`test/` 下的测试（`node --test`），共 **152** 个。在 `$DSH_RUNTIME`（默认
-  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 149 通过 / 3 跳过 /
+- `npm test`——`test/` 下的测试（`node --test`），共 **164** 个。在 `$DSH_RUNTIME`（默认
+  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 161 通过 / 3 跳过 /
   0 失败：三个「真实目录」schema 用例只有把 `MCP_REVIEW_CATALOG` 指向评审用 210 工具目录的
-  本地副本时才运行（此时 152 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。CI
+  本地副本时才运行（此时 164 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。CI
   （`.github/workflows/test.yml`，Node 22 与 24）既没有解包运行时、也没有该目录，于是 17 个
-  依赖运行时的用例 + 3 个真实目录用例跳过：132 通过 / 20 跳过 / 0 失败。
+  依赖运行时的用例 + 3 个真实目录用例跳过：144 通过 / 20 跳过 / 0 失败。
 - `node scripts/repro-review.mjs`——评审缺陷**回归门**（默认 `--expect fixed`）。它把
   2026-11-19 评审的六组缺陷在当前代码上重放，只有一组都不复现时才 exit 0；否则打印
   `REGRESSION: <families>` 并 exit 1。凡是能观察到「修好后的结果」的组（准入、控制队列、
@@ -544,11 +564,13 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
 - `/dsh-mcp-hub/*` 的信任门来自 Host 的 `connection` 服务，管理半侧也只在该服务存在时激活；若一次
   重组后路由仍挂载而服务暂时消失，它们返回 `503`（fail closed）且不做任何改动。
 - 已装载的工具会在本会话剩余时间里留在工具数组中；卸载会再次改变数组并再付一次缓存未命中。
-- 披露记账是 fail-open 的：作用域或注册不可用时，按「种类 + agent」只记一条警告并让工具保持可见，
-  不会让模型请求失败；prompt 组装时的安全网会重试从未装上的遮蔽。
+- 披露记账是 fail-open 的：作用域或注册不可用时，按「种类 + Agent 对象」只记一条警告并让工具保持
+  可见，不会让模型请求失败；prompt 组装时的安全网会重试从未装上的遮蔽。
 - PTC 呈现的 agent（`tools: { mode: ptc }`，如内置 `preset-ptc`）读取同一份受限视图，隐藏与
   已装载工具都覆盖；`mcp_call` 在 PTC 模式下不能直接分发，会提示改用 `mcp_load` 后在
   `run_code` 内调用。
+- 目录只读取全局注册表视图：由 agent preset 或 agent 作用域挂载的 MCP 工具既不会被隐藏，也搜不到
+  （1.3 候选；披露 restriction 看不到它们）。
 - 非 MCP 工具不受影响。
 
 ### 许可证
