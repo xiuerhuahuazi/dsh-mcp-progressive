@@ -1,4 +1,4 @@
-# Security contract — management half (1.2.1)
+# Security contract — management half (1.2.1 → 1.3.0)
 
 This note records what the MCP server management half (`lib/management.js`, `client.js`)
 promises, and the raw evidence behind it. It is written from the code and from a real,
@@ -6,7 +6,8 @@ isolated DSH boot; anything not verified is marked as such.
 
 The disclosure half (`index.js`) exposes no network surface. Its trust boundary is
 described in `README.md` → Limitations (hiding is view + dispatch, not a permission
-boundary).
+boundary). 1.3.0 adds one read of the running MCP client's status cell; it opens no new
+surface and no write path (§3.1).
 
 ## 1. What listens
 
@@ -85,6 +86,33 @@ A parse error never repeats request bytes, because a caller could put a secret t
   cannot be parsed becomes `(invalid URL)`; a valid URL prints only `.host` (topology,
   not a secret).
 
+### 3.1 Live status read (1.3.0)
+
+Every server row (state route, model list) may additionally carry its live connection status,
+read from the **running** `@deepseek-ai/dsh-mcp-client` instance through the Loader entry that
+row really imported:
+`entry.moduleNamespace.connectionStatusOf(entry.fiber?.ctx?.fiber ?? entry.fiber).current()`.
+It is read-only:
+
+- no route, method, header or approval change — the pipeline in §2 is unchanged, and the read
+  never writes a patch, never calls `setPluginEnabled`, and never subscribes (`onChange` is not
+  called: the client returns a disposer and there is no host-owned place for the plugin to keep
+  it, so per-request subscription would leak);
+- the copied data is **whitelisted**: `state`, `reason`, `lastError`, `toolCount`, `connectedAt`,
+  `attempt`, `maxAttempts`, `nextRetryAtMs`; text is collapsed to one line and bounded (240
+  chars in the payload, 120 in `statusDetail`), numbers must be finite, and a value that is not
+  an object with a non-empty string `state` is dropped entirely, so a status cell cannot smuggle
+  fields into the payload;
+- the plugin adds **no credential or argument material** of its own: `lastError` is the MCP
+  client's own error line, surfaced to the authenticated panel/model as the client wrote it
+  (the plugin does not expand `${credential:…}` templates or echo argv), and `targetSummary`'s
+  redaction above is unchanged;
+- the seam is not a documented plugin contract: it is guarded by
+  `typeof moduleNamespace.connectionStatusOf === 'function'` and `try/catch`, and any failure
+  falls back to the 1.2.1 inference. A failed read can never be reported as "connected", so
+  breaking the seam cannot forge a status — it can only degrade to the older, less specific
+  answer. `scripts/probe-live-status.mjs` fails loudly when a DSH release moves it.
+
 ## 4. File writes
 
 A home-patch row is toggled by writing `~/.dsh/cordis.patch.yml`
@@ -132,7 +160,7 @@ launch token, and raw `node:http` requests so `Host` is actually sent (`fetch` s
 drops a custom `Host`). The only mutation attempted is against a non-existent server, so
 nothing was start/stoppable.
 
-| Probe | Result |
+| Probe | Result (measured on 1.2.1; 1.3.0 changes no admission code) |
 |---|---|
 | `GET /state`, no cookie | `401` `{"ok":false,"error":"unauthorized"}` |
 | `GET /state`, `Host: evil.example`, no cookie | `403` `forbidden` |
@@ -163,7 +191,7 @@ Reproduce with ephemeral state only: point `DSH_HOME` at a `mkdtemp` directory, 
 
 ## 7. Verification gates
 
-Both scripts are release gates now; CI runs neither (`npm test` is CI's gate).
+These scripts are release gates now; CI runs none of them (`npm test` is CI's gate).
 
 ### 7.1 Real boot — `node scripts/live-boot.mjs` (default `--expect fixed`)
 
@@ -172,7 +200,7 @@ It creates a throw-away `DSH_HOME`, installs this package into a `test` profile,
 drives the routes with `node:http` (so an explicit `Host` really reaches the server),
 snapshots both patch layers before and after, and requires every probe to match.
 
-| Probe | Accepted | Observed on 1.2.1 |
+| Probe | Accepted | Observed (1.2.1; re-confirmed by the 1.3.0 `live-boot` gate) |
 |---|---|---|
 | `state-unauthenticated` | `401` or `403`, JSON refusal | `401` (no authenticated peer) |
 | `state-bad-host` | `403`, JSON refusal | `403` |
@@ -210,17 +238,19 @@ runtime the YAML family reports `skip` (the platform insert/override rule cannot
 honestly) and the gate still exits 0 when nothing reproduces; a skip is never a pass.
 `--expect baseline` is the historical 1.2.0 mode and passes only on a v1.2.0 checkout.
 
-Both gates were checked against the `v1.2.0` tag in both directions: on `v1.2.0` the
-baseline modes pass and the fixed modes fail, and on this release the reverse.
+The `repro-review` and `live-boot` gates were checked against the `v1.2.0` tag in both
+directions: on `v1.2.0` the baseline modes pass and the fixed modes fail, and on this release
+the reverse.
 
 ### 7.3 Fixture note
 
 The real-runtime smoke fixture that previously lacked a Host `connection` service is fixed in
 `02fe061`: `mountPlugin()` now provides it (and `mountPlugin({ connection: false })` models a
-host without it). With the runtime present `npm test` is 167 tests, 164 pass / 3 skip /
+host without it). With the runtime present `npm test` is 187 tests, 184 pass / 3 skip /
 0 fail (the three optional real-catalog cases skip unless `MCP_REVIEW_CATALOG` points at a
-local copy of the review catalog, which makes it 167 pass / 0 skip), and on CI — no runtime,
-no catalog — it is 167 tests, 146 pass / 21 skip / 0 fail.
+local copy of the review catalog, which makes it 187 pass / 0 skip), and on CI — no runtime,
+no catalog — it is 187 tests, 166 pass / 21 skip / 0 fail. The 1.3.0 live-status cases run in
+every posture: their fixtures need no DSH runtime.
 
 ### 7.4 Independent audits (2026-11-19)
 
@@ -243,10 +273,10 @@ the final code:
   Agent/SystemPrompt seams are still stubbed) and F7 is recorded as the live-boot gate's
   coverage boundary in §7.1.
 
-Final postures on this tree: `npm test` 167 tests — 164 pass / 3 skip / 0 fail locally,
-167 pass / 0 skip with `MCP_REVIEW_CATALOG`, 146 pass / 21 skip / 0 fail on a runtime-less
+Final postures on this tree: `npm test` 187 tests — 184 pass / 3 skip / 0 fail locally,
+187 pass / 0 skip with `MCP_REVIEW_CATALOG`, 166 pass / 21 skip / 0 fail on a runtime-less
 CI; `node scripts/repro-review.mjs` PASS `0/6`; `node scripts/live-boot.mjs` PASS `9/9`
-(real boot).
+(real boot; plus the 1.3.0 two-row live probes).
 
 ## 8. Residual risks / deferred
 
@@ -259,9 +289,11 @@ CI; `node scripts/repro-review.mjs` PASS `0/6`; `node scripts/live-boot.mjs` PAS
   moment without the service; they then answer `503` and change nothing.
 - `mcp_servers` does not report hidden/leaked catalog counts (deferred P2-4); a mask that
   failed to install is visible only as a warning line in the plugin log.
-- Server status is inferred, not a live MCP handshake; a row can read "connected, no
-  tools" while its server is in a failed reconnect state (a recorded `diagnostic` does
-  surface as `error`).
+- Live status depends on an undocumented seam. Where the Host does not expose
+  `Entry.moduleNamespace.connectionStatusOf` (or the read throws), the row falls back to the
+  1.2.1 inference and can again read "connected, no tools" while its server is in a failed
+  reconnect state (a recorded `diagnostic` does surface as `error`). This is a fidelity
+  residual, not a security one: the read adds no write path and cannot forge "connected".
 - Deletion of `.mcp-hub.bak`/temporary files is not managed: the backup is rewritten in
   place, and a crash mid-rename can leave a random-suffix temporary (never a truncated
   target, because the rename is atomic).

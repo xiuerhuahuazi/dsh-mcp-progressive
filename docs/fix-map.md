@@ -1,8 +1,8 @@
-# Fix map — 1.2.0 review → 1.2.1
+# Fix map — 1.2.0 review → 1.2.1, and 1.3.0 live status
 
-Audit trail for the 2026-11-19 review (`SYNTHESIS.md` §3/§4/§5). Every row names the
-code that changed and the regression that locks it. Test names are verbatim from the
-files; a test may cover several rows.
+Audit trail for the 2026-11-19 review (`SYNTHESIS.md` §3/§4/§5) and for the 1.3.0
+live-status change. Every row names the code that changed and the regression that locks it.
+Test names are verbatim from the files; a test may cover several rows.
 
 **Status legend**
 
@@ -57,7 +57,7 @@ files; a test may cover several rows.
 | P1-5 — no prompt hint that the catalog exists | Fixed | `index.js` · `systemPrompt.section({ name: 'mcp-progressive:catalog', order: 3050, text })` — server names/counts up to 4, `mcp_search` pointer, empty catalog contributes `''` | `test/core.test.mjs` › `P1-5: the catalog prompt section is per-assembly and contributes nothing without a catalog` |
 | P1-6 — `mcp_call` drops the MCP error body and presentation meta | Partially fixed | `index.js` · `contentText`, error branch of `mcp_call.execute` returns `Error from MCP tool "…": <server text>` (dedupes the native `Error: ` wrapper); `pendingResults` + `projectContent` forward content blocks and images. Nested `meta` has no seam into the outer card — documented in `README.md` → Limitations | `test/core.test.mjs` › `P1-6: mcp_call returns the MCP error text content instead of a bare message` |
 | P1-7 — `mcp_server` has no approval gate | Fixed | `index.js` · `tools/pre-execute` handler returns `{ kind: 'ask', reason, displayReason }` for `mcp_server` start/stop/restart; `displayReason` is a `{ en, zh }` locale record as the platform contract declares (audit F6); `mcp_servers` and the browser routes are not gated | `test/core.test.mjs` › `P1-7: mcp_server writes ask for approval while mcp_servers stays ungated` |
-| P1-8 — untestable pure helpers; no test script | Fixed | Host half split into `lib/patch.js` / `lib/search.js` / `lib/management.js`; `index.js` · `__test` exports the seams; `test/*.test.mjs` with `node --test`; `package.json` declares `"test": "node --test"` (set before this lane) | `test/smoke.test.mjs` › `__test exposes the stable pure-helper seam`; `the pure helpers behave as documented`; whole suite: `npm test` → 167 cases (see Evidence run) |
+| P1-8 — untestable pure helpers; no test script | Fixed | Host half split into `lib/patch.js` / `lib/search.js` / `lib/management.js`; `index.js` · `__test` exports the seams; `test/*.test.mjs` with `node --test`; `package.json` declares `"test": "node --test"` (set before this lane) | `test/smoke.test.mjs` › `__test exposes the stable pure-helper seam`; `the pure helpers behave as documented`; whole suite: `npm test` → 187 cases at 1.3.0 (see Evidence run) |
 | P1-9 — fail-open never self-heals | Fixed | `index.js` · `reconcile` sets `state.masked = false` in the catch and `true` only after a restriction install; `system-prompt/assemble` safety net tests `disclosures.get(agent)?.masked !== true`; failure log names the agent id and catalog size | `test/core.test.mjs` › `P1-9: a failed restriction install is retried by the assemble safety net`; `P1-9: a failed reconcile logs the agent id and the catalog size` |
 | P1-10 — PTC guidance branch is dead code | Fixed | `index.js` · `ptcRefusalGuidance` checks the result text (and the thrown message as fallback) for `run_code`; applied to result and error paths before returning/throwing | `test/core.test.mjs` › `P1-10: a PTC refusal returned as a result yields the guidance string` |
 | P1-11 — nested MCP dispatch missing from the session log | Fixed (revised after the core audit: logging it was a P0 history bug) | `index.js` · `mcp_call` passes **no** `log` to the nested `ctx.tools.execute`; `auditLine` (target + argument keys) is attached to every post-dispatch return path (a rare internal `ToolBatchExecutionError` still throws, thread intact); `projectContent` only replaces the result content when the nested call produced real text or an image block, so the empty-output fallback sentence survives (including whitespace-only content, F12) | `test/core.test.mjs` › `P1-11: mcp_call leaves a real Session history with no orphan tool result`; `P1-11: the nested call is always reported in the result audit line`; `F12: whitespace-only nested content keeps the no-output fallback` |
@@ -77,7 +77,7 @@ files; a test may cover several rows.
 | P2-5 — PTC detection relies on `/run_code/` text | Partially fixed | `index.js` · detection now covers the result path as well as a thrown message (`ptcRefusalGuidance`), but it is still a text match, not an error code | `test/core.test.mjs` › `P1-10: a PTC refusal returned as a result yields the guidance string` |
 | P2-6 — `oneLine` budgets UTF-16 units, not tokens | Not changed | `lib/search.js` · `oneLine` still clips by string length; `summaryChars` is a character budget (24–600) | Code read; no behaviour regression claimed |
 | P2-7 — two concurrent `mcp_call`s of one tool | Moot | `index.js` · `mcp_load` / `mcp_call` do not declare `isConcurrencySafe`, so the platform pipeline runs them exclusively per agent; only `mcp_search` returns `true` | Code read (`index.js` tool definitions) + review §8.9 |
-| P2-8 — `catalogOf()` sees only the global registry view | Not changed (documented, core audit F8) | `index.js` · `catalogOf` still reads `ctx.tools.schemas()` (global); agent/preset-scope-mounted MCP tools are neither hidden nor searchable. Added to `README.md` → Limitations as a 1.3 candidate | Code read; `README.md` → Limitations |
+| P2-8 — `catalogOf()` sees only the global registry view | Not changed (documented, core audit F8) | `index.js` · `catalogOf` still reads `ctx.tools.schemas()` (global); agent/preset-scope-mounted MCP tools are neither hidden nor searchable. Recorded in `README.md` → Limitations as a 1.4 candidate (1.3.0 did not take it) | Code read; `README.md` → Limitations |
 | P2-9 — `state` route accepts any method | Fixed | `lib/management.js` · `requireMethod(req, res, ['GET', 'HEAD'])` and `['POST']` on the other routes, with `Allow` | `test/management.test.mjs` › `methods are enforced with an allow header`; raw probe in `docs/security.md` (`DELETE` → `405 Allow: GET, HEAD`) |
 | P2-10 — oversized body destroys the socket, client sees only a reset | Fixed | `lib/management.js` · `readJsonBody` answers `413`, removes the data listener and drains (`req.resume()`) | `test/management.test.mjs` › `an oversized body is answered with 413 instead of a reset connection` |
 | P2-11 — panel action error cleared by the next poll | Fixed | `client.js` · separate `loadError` vs `outcome`; only a new action or a successful action snapshot clears the last action outcome | `test/client.test.mjs` › `a failed action stays visible after a following successful poll` |
@@ -95,34 +95,62 @@ Limitations.
 
 ---
 
+## 1.3.0 — live MCP status
+
+The 1.3.0 change is a read, not a rewrite: each server row now prefers the running MCP client's
+own status cell, with the 1.2.1 inference as the fallback. The public status vocabulary is
+unchanged; the explanation travels as `statusDetail` text. The memo behind the design (source,
+probes, migration verdict) is
+`dsh-mcp-progressive-review/2026-11-19/arch-1.3-investigation.md`; the resulting design is in
+[docs/architecture.md](architecture.md).
+
+| Item | Status | What changed (file · function) | Regression evidence (test file › test name) |
+|---|---|---|---|
+| L1 — read the live status off the Loader entry | Fixed | `lib/management.js` · `liveStatusOf(entry)` (`entry.moduleNamespace.connectionStatusOf(entry.fiber?.ctx?.fiber ?? entry.fiber).current()` behind a `typeof` guard and `try/catch`, `null` on every failure), `sanitizeLiveStatus` (whitelisted fields, finite numbers, collapsed/bounded text), `collectServerRows` reads it per row | `test/management.test.mjs` › `sanitizeLiveStatus keeps only the documented fields and bounded text`; `the state route reports a reconnecting row as starting with its live detail` (normalizes to `fiber.ctx.fiber`, `onChangeCalls === 0`, a synthetic extra field cannot reach the payload); `a Loader entry without a usable live-status seam falls back cleanly (older DSH)`; `a throwing or empty live read falls back instead of failing the request` |
+| L2 — map the live states onto the public vocabulary | Fixed | `lib/management.js` · `liveStatusView` (`connected` → `running`/`idle` by the live `toolCount`, `connecting`/`reconnecting`/`waiting-credentials`/`closed` → `starting`, `failed` → `error`; detail text), `serverStatus` prefers the live view and only decides an enabled, non-unloading row; live `toolCount` wins over the prefix count | `test/management.test.mjs` › `liveStatusView maps every MCP state onto the public vocabulary and a one-line detail`; `serverStatus prefers the live status and keeps the inference when it is absent`; `a connected row is running or idle by the live tool count, which wins over the prefix count`; `a failed live status is an error and a disabled row stays stopped`; `serverStatus keeps the documented vocabulary, including stopping` (1.2.1 case, still green) |
+| L3 — expose the status to the browser and the model | Fixed | `lib/management.js` · `presentServer` adds `live` and `statusDetail`; `renderServerList` appends the one-line detail to `mcp_servers` / `mcp_server` answers | `test/management.test.mjs` › `presentServer carries live and statusDetail without changing the rest of the contract`; `the model-facing text appends the live status detail`; `the mcp_server result text carries the live detail in its trailing list` |
+| L4 — render the detail without changing the vocabulary | Fixed | `client.js` · `liveOf`, `liveLabelOf` (reconnecting attempt/retry, waiting-credentials), `retryHintOf` (Host clock), `detailOf` (`statusDetail` first, `live` fallback; a connected/closed cell never explains a past error), `.dsh-mcp-card-detail`, tag `title` = label + detail | `test/client.test.mjs` › `a reconnecting starting row names the attempt and hints the retry`; `a starting row waiting for credentials says so`; `an error row shows the Host detail on the card and in the tag hint`; `an error row without a Host detail falls back to live.lastError`; `a detail that disappears between polls is removed cleanly`; `a running row without live data renders exactly as before`; `an older Host row without live/statusDetail fields still renders` |
+| L5 — keep the detail one bounded line | Fixed | `lib/management.js` · `DETAIL_ERROR_MAX_CHARS` (120) and `clip`; `LIVE_ERROR_MAX_CHARS` (240) in the payload | `test/management.test.mjs` › `the status detail clips a long lastError to one bounded line` (≤ 140 chars, no newline) |
+| L6 — read-only, no subscription, no write | Fixed | `lib/management.js` · `liveStatusOf` only calls `current()`; there is no `onChange` call anywhere and no write path is touched by a read | `test/management.test.mjs` › `reading live status never reaches a write path` (no `setPluginEnabled`, patch bytes unchanged); the live fixtures' `onChange` throws and the route test asserts it is never called |
+| L7 — capability and real-runtime evidence | Fixed | `scripts/probe-live-status.mjs` asserts `typeof entry.moduleNamespace.connectionStatusOf === 'function'` and a usable cell on a live row (non-zero exit when the seam is gone); `scripts/live-boot.mjs` boots two real MCP rows (broken command → `error`/`failed`, working local server → `running`/`connected` with the live tool count) | Release gates, not suite cases (see [test/README.md](../test/README.md) → *The gates*). The suite's fixture-level coverage of the same paths is L1–L6 above |
+
+Not changed in 1.3.0 (recorded, so a reviewer does not look for it):
+
+- **mcp-manager migration** — deferred; evidence and preconditions in
+  [architecture.md §5](architecture.md#5-mcp-manager-migration-verdict).
+- **P2-4** (hidden/leaked counts) and the **cross-process lock** remain the 1.2.1 residuals.
+- **P2-8** (agent/preset-scope MCP tools are outside the catalog) is now a 1.4 candidate.
+
 ## Evidence run
 
-Environment: this worktree (1.2.1), Node v25.8.0, macOS, unpacked runtime present at
-`/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`.
+Environment: this worktree (1.3.0), Node v25.8.0, macOS, unpacked runtime present at
+`/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`, review catalog at
+`dsh-mcp-progressive-review/2026-11-19/probe/deepseek/catalog.json`.
 
 ```
 $ npm test                      # unpacked runtime present, MCP_REVIEW_CATALOG unset
-ℹ tests 167
-ℹ pass 164
+ℹ tests 187
+ℹ pass 184
 ℹ fail 0
 ℹ skipped 3
 
-$ MCP_REVIEW_CATALOG=<local copy of the review catalog> npm test
-ℹ tests 167
-ℹ pass 167
+$ MCP_REVIEW_CATALOG=<review catalog> npm test
+ℹ tests 187
+ℹ pass 187
 ℹ fail 0
 ℹ skipped 0
 
 $ DSH_RUNTIME=/nonexistent npm test      # what CI runs (no runtime, no catalog)
-ℹ tests 167
-ℹ pass 146
+ℹ tests 187
+ℹ pass 166
 ℹ fail 0
 ℹ skipped 21
 ```
 
 The 3 cases skipped in the default local posture are the real-catalog schema cases; they only
 run when `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (private,
-not committed). The 21 CI skips are those 3 plus the 18 runtime-dependent cases.
+not committed). The 21 CI skips are those 3 plus the 18 runtime-dependent cases. The 1.3.0
+live-status cases run in every posture (the live fixtures need no runtime).
 
 ```
 $ node scripts/repro-review.mjs
@@ -154,19 +182,24 @@ $ node scripts/live-boot.mjs        # default --expect fixed, real boot
   ok  state-wrong-method       status=405  expected=405
   ok  state-authenticated      status=200  expected=200
 
-  PASS  (1058 ms)
+  PASS  (1276 ms)
 ```
 
 `live-boot` also snapshots both patch layers before and after the probes and fails unless
-they are byte-identical: every rejected probe changed nothing.
+they are byte-identical: every rejected probe changed nothing. For 1.3.0 it additionally boots
+two real MCP rows — one whose command cannot start, one working local MCP server — and requires
+the broken row to read `error` with `failed: …` detail while the working row reads `running`
+from the live cell; `scripts/probe-live-status.mjs` is the separate capability assertion (a DSH
+release that drops the seam fails it instead of silently degrading). Both are release gates,
+not suite cases.
 
 Gate semantics: `repro-review`'s default `--expect fixed` is the regression gate (exit 0 = no
 reviewed defect reproduces); `--expect baseline` is the historical 1.2.0 evidence mode and
 only passes on a `v1.2.0` checkout. `live-boot`'s default `--expect fixed` is the real-platform
 gate (real DSH boot, `node:http` so `Host` is sent, real cookie); `--expect baseline` only
-matches `v1.2.0`. Both gates were checked against the `v1.2.0` tag in both directions by the
-regression lane: on `v1.2.0` the baseline modes pass and the fixed modes fail, and on this
-release the reverse.
+matches `v1.2.0`. The `repro-review` and `live-boot` gates were checked against the `v1.2.0`
+tag in both directions by the regression lane: on `v1.2.0` the baseline modes pass and the
+fixed modes fail, and on this release the reverse.
 
 ## Independent audits (2026-11-19)
 

@@ -4,6 +4,75 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-11-19
+
+Distribution: 1.3.0 is published on 2026-11-19 as a GitHub tag/release (`v1.3.0`).
+The npm registry still serves 1.2.0 (1.2.1 was never published there either), so
+install the git spec from README → Install — the tag, or the release commit it
+points at for a pinned install. The npm `dsh-mcp-progressive@1.3.0` path will be
+added once it is published there.
+
+Added:
+
+- Live connection status for MCP server rows. The plugin reads the running MCP
+  client's own status cell through the Loader entry that row really imported
+  (`entry.moduleNamespace.connectionStatusOf(entry.fiber?.ctx?.fiber ??
+  entry.fiber).current()`), guarded by a `typeof … === 'function'` check and a
+  `try/catch`, and falls back silently to the 1.2.1 inference
+  (`fiberPhase`, `diagnostic`, registered `mcp__<server>__*` names) whenever the
+  Host does not expose the seam. It never imports
+  `@deepseek-ai/dsh-mcp-client`: a second module instance keeps its own status
+  `WeakMap` and would answer `undefined` for another instance's fiber.
+- The read maps `connected` / `connecting` / `reconnecting` /
+  `waiting-credentials` / `closed` / `failed` onto the **unchanged** public
+  vocabulary (`stopped|running|idle|starting|stopping|error|unknown`); the
+  explanation is text, not a new token. A live `connected` generation's
+  `toolCount` wins over the prefix count, `idle` means connected with 0 tools,
+  and a disabled or unloading row never reports the live state.
+- `live` (whitelisted, bounded fields) and `statusDetail` in the
+  `/dsh-mcp-hub/state` payload; `mcp_servers` and the `mcp_server` result append
+  the same one-line detail (`reconnecting (attempt N/M) · retry in Ns · <last
+  error>`, `waiting for credentials`, `failed: <reason> · <last error>`).
+- The panel shows that detail as a clamped second line (full text in the tag
+  `title`), names the reconnect attempt on the tag, says "waiting for
+  credentials", and discloses a failure's last error. Where the live cell is
+  present, "connected, no tools" is shown only for `connected` with `toolCount: 0`.
+- `scripts/probe-live-status.mjs`, the seam's capability assertion: it exits
+  non-zero when a live row no longer exposes `connectionStatusOf` (or the read
+  returns no usable cell), so a DSH rename fails loudly instead of degrading to
+  inference silently. `scripts/live-boot.mjs` additionally boots two real MCP
+  rows — a broken command and a working local server — and requires `error` /
+  `failed` and `running` / `connected` respectively.
+- `docs/architecture.md`: the plugin's seams, the mcp-manager migration verdict
+  and its evidence, the do-not-do list, and the open product questions.
+
+Changed:
+
+- Status documentation (README, both halves) now describes live-first status with
+  inference as the fallback, the seam's contract status, and the unchanged token
+  vocabulary; the limitations record the fallback and the deferred migration.
+- Install documentation moves to 1.3.0 (GitHub tag; npm still 1.2.0).
+- `docs/fix-map.md` gains the 1.3.0 item → change → regression table and the
+  current suite postures (187 tests); `docs/security.md` records the read-only
+  live-status path; `test/README.md` documents the new cases and scripts.
+
+Deferred:
+
+- The migration to the official `mcpManager`: not a capability gap but a
+  configuration-ownership change. In this deployment the manager composes 0
+  servers; it owns only `Config.servers`; home-patch rows are invisible to it;
+  `settings` refuses values overridden by a home patch; there is no Remote CRUD;
+  and it registers `mcp__*` tools, so disclosure would still work after a
+  migration. Moving the definitions would also have to happen in one step
+  (same-name rows collide). See `docs/architecture.md`.
+- P2-4: `mcp_servers` still does not report hidden/leaked counts; that needs
+  disclosure state private to the Host half, so a failed mask remains visible
+  only in the log.
+- No cross-process file lock: patch writes remain compare-and-swap with three
+  attempts, not coordinated with `plugin_manager`'s pnpm writes (security audit
+  F5). A concurrent edit can fail visibly with `PATCH_STALE`; the file is never
+  corrupted and the loss is never silent.
+
 ## [1.2.1] - 2026-11-19
 
 Distribution: 1.2.1 was published on 2026-11-19 as a GitHub tag/release
