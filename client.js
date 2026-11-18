@@ -53,9 +53,16 @@ window.__ModuleLoader__.load({
         'status.stopped': 'stopped',
         'status.idle': 'connected, no tools',
         'status.starting': 'starting',
+        'status.reconnecting': 'reconnecting (attempt {attempt}/{maxAttempts})',
+        'status.reconnectingNoAttempt': 'reconnecting',
+        'status.waitingCredentials': 'waiting for credentials',
         'status.stopping': 'stopping',
         'status.error': 'error',
         'status.unknown': 'unknown',
+        tagTitle: 'status: {label} — {detail}',
+        tagTitlePlain: 'status: {label}',
+        retryIn: 'retry in {seconds}s',
+        'live.failed': 'failed',
       },
       zh: {
         tabTitle: 'MCP 服务器',
@@ -83,9 +90,16 @@ window.__ModuleLoader__.load({
         'status.stopped': '已停止',
         'status.idle': '已连接（无工具）',
         'status.starting': '启动中',
+        'status.reconnecting': '重连中（第 {attempt}/{maxAttempts} 次）',
+        'status.reconnectingNoAttempt': '重连中',
+        'status.waitingCredentials': '等待凭据',
         'status.stopping': '停止中',
         'status.error': '错误',
         'status.unknown': '未知',
+        tagTitle: '状态：{label} — {detail}',
+        tagTitlePlain: '状态：{label}',
+        retryIn: '{seconds} 秒后重试',
+        'live.failed': '失败',
       },
     }
 
@@ -110,6 +124,7 @@ window.__ModuleLoader__.load({
 .dsh-mcp-tag[data-tone=danger]{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent);color:var(--dsw-alias-state-error-primary)}
 .dsh-mcp-tag[data-tone=neutral]{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary)}
 .dsh-mcp-card-desc{display:-webkit-box;overflow:hidden;-webkit-line-clamp:1;-webkit-box-orient:vertical;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:18px}
+.dsh-mcp-card-detail{display:-webkit-box;overflow:hidden;-webkit-line-clamp:1;-webkit-box-orient:vertical;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12);line-height:16px;overflow-wrap:anywhere}
 .dsh-mcp-card-end{position:relative;z-index:1;display:inline-flex;flex:none;align-items:center;gap:8px}
 .dsh-mcp-icon-btn{position:relative;box-sizing:border-box;display:inline-flex;flex:none;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;transition:background .12s ease,color .12s ease}
 .dsh-mcp-icon-btn::after{content:'';position:absolute;inset:-2px;border-radius:inherit}
@@ -280,6 +295,83 @@ window.__ModuleLoader__.load({
       return 'neutral'
     }
 
+    /**
+     * The live connection record of one row, or `null`.
+     *
+     * The Host half sends `live: null` when it cannot read the running
+     * instance (or when it predates 1.3); anything that is not an object is
+     * treated the same way so a missing field can never crash the card.
+     */
+    function liveOf(server) {
+      const live = server !== null && typeof server === 'object' ? server.live : null
+      return live !== null && typeof live === 'object' ? live : null
+    }
+
+    /** One dictionary string with its `{name}` placeholders filled in. */
+    function fillTemplate(text, values) {
+      return text.replace(/\{(\w+)\}/g, (match, name) =>
+        Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match)
+    }
+
+    /** A whole number from the wire, or `null` when the field is absent. */
+    function integerOf(value) {
+      return typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : null
+    }
+
+    /**
+     * Live wording for a row the Host maps to `starting` (connecting,
+     * reconnecting, waiting-credentials), or `null` when the plain translated
+     * `starting` label is right.
+     */
+    function liveLabelOf(server, live, t) {
+      if (live === null || server.status !== 'starting') return null
+      if (live.state === 'reconnecting') {
+        const attempt = integerOf(live.attempt)
+        const maxAttempts = integerOf(live.maxAttempts)
+        if (attempt === null || maxAttempts === null) return t('status.reconnectingNoAttempt')
+        return fillTemplate(t('status.reconnecting'), { attempt, maxAttempts })
+      }
+      if (live.state === 'waiting-credentials') return t('status.waitingCredentials')
+      return null
+    }
+
+    /** Seconds until the next reconnect attempt, or `null` when unknown. */
+    function retryHintOf(live, now, t) {
+      const at = live.nextRetryAtMs
+      if (typeof at !== 'number' || !Number.isFinite(at) || typeof now !== 'number') return null
+      const seconds = Math.max(0, Math.ceil((at - now) / 1000))
+      return fillTemplate(t('retryIn'), { seconds })
+    }
+
+    /**
+     * One-line explanation for the card's second line.
+     *
+     * The Host's `statusDetail` is authoritative. When it is absent (older
+     * Host, or the read failed) a line is rebuilt from `live` — the failure
+     * reason, the next retry, and the last error — so the card still explains
+     * an `error` row instead of leaving it bare. `null` means "no detail".
+     */
+    function detailOf(server, live, now, t) {
+      const detail = typeof server.statusDetail === 'string' ? server.statusDetail.trim() : ''
+      if (detail !== '') return detail
+      if (live === null) return null
+      const parts = []
+      if (live.state === 'failed') {
+        const reason = typeof live.reason === 'string' && live.reason !== '' ? live.reason : ''
+        parts.push(reason === '' ? t('live.failed') : t('live.failed') + ': ' + reason)
+      } else if (live.state === 'reconnecting') {
+        const retry = retryHintOf(live, now, t)
+        if (retry !== null) parts.push(retry)
+      } else if (live.state !== 'waiting-credentials') {
+        // A connected/closed cell never explains a past error: `lastError` is
+        // only meaningful while the connection is failed or retrying.
+        return null
+      }
+      const error = typeof live.lastError === 'string' && live.lastError !== '' ? live.lastError : null
+      if (error !== null) parts.push(error)
+      return parts.length === 0 ? null : parts.join(' · ')
+    }
+
     function createPanel(fallbackT) {
       return function McpServersPanel(props) {
         const t = props !== null && props !== undefined && typeof props.t === 'function' ? props.t : fallbackT
@@ -374,13 +466,22 @@ window.__ModuleLoader__.load({
         }, [])
 
         const servers = state !== null && Array.isArray(state.servers) ? state.servers : []
+        // `now` is the Host's clock, so a retry countdown computed from
+        // `live.nextRetryAtMs` stays meaningful even when the panel's own clock
+        // drifts. It is absent from older Hosts; the countdown is then skipped.
+        const now = state !== null && typeof state.now === 'number' && Number.isFinite(state.now) ? state.now : null
 
         const card = (server) => {
           const key = addressOf(server)
           const pendingAction = pending.get(key)
           const busy = pendingAction !== undefined
+          const live = liveOf(server)
           const stateKey = busy ? BUSY_STATE[pendingAction] : String(server.status || 'unknown')
-          const label = busy ? t(BUSY_STATE[pendingAction]) : t('status.' + stateKey)
+          // The Host maps connecting/reconnecting/waiting-credentials to
+          // `starting`; an in-flight action keeps its own verb ("Starting…"),
+          // otherwise the live state says which kind of start this is.
+          const liveLabel = busy ? null : liveLabelOf(server, live, t)
+          const label = liveLabel === null ? (busy ? t(BUSY_STATE[pendingAction]) : t('status.' + stateKey)) : liveLabel
           const tone = statusTone(stateKey)
           const meta = [server.transport, server.target, server.toolCount + ' ' + t('toolsUnit')]
             .filter((part) => typeof part === 'string' && part !== '')
@@ -389,6 +490,14 @@ window.__ModuleLoader__.load({
           // instead of leaving "error" unexplained.
           const diagnostic = typeof server.diagnostic === 'string' && server.diagnostic !== '' ? server.diagnostic : null
           const description = diagnostic === null ? meta : meta === '' ? diagnostic : meta + ' · ' + diagnostic
+          // The Host's one-line live explanation (reason, retry countdown, last
+          // error). Shown as a second clamped line; the full text stays in the
+          // title, so nothing is lost to the ellipsis.
+          const detail = detailOf(server, live, now, t)
+          const tagHint = detail === null ? diagnostic : detail
+          const tagTitle = tagHint === null
+            ? fillTemplate(t('tagTitlePlain'), { label })
+            : fillTemplate(t('tagTitle'), { label, detail: tagHint })
           const name = serverLabel(server)
           const restartButton = h('button', {
             type: 'button',
@@ -415,8 +524,9 @@ window.__ModuleLoader__.load({
               h('div', { className: 'dsh-mcp-card-main' },
                 h('div', { className: 'dsh-mcp-title-row' },
                   h('span', { className: 'dsh-mcp-card-title' }, name),
-                  h('span', { className: 'dsh-mcp-tag', 'data-tone': tone }, label)),
-                h('p', { className: 'dsh-mcp-card-desc', title: description }, description)),
+                  h('span', { className: 'dsh-mcp-tag', 'data-tone': tone, title: tagTitle }, label)),
+                h('p', { className: 'dsh-mcp-card-desc', title: description }, description),
+                detail === null ? null : h('p', { className: 'dsh-mcp-card-detail', title: detail }, detail)),
               h('div', { className: 'dsh-mcp-card-end' }, restartButton, switchButton)))
         }
 
