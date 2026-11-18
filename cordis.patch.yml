@@ -1,0 +1,8 @@
+# Insert the MCP progressive-disclosure plugin. It hides `mcp__*` tool schemas
+# from the model's prompt by default and exposes mcp_search / mcp_load / mcp_call
+# meta-tools instead. Configure the row to change the prefix, defaults, or the
+# always-visible allowlist.
+- insert:
+    - id: mcp-progressive
+      name: 'dsh-mcp-progressive'
+      config: {}

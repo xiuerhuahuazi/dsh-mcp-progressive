@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "MCP Progressive Disclosure",
+    "description": "Keeps MCP tool schemas out of the model's context until they are needed, and adds an MCP servers tab to the Plugins page for starting, stopping and restarting MCP servers."
+  }
+}
