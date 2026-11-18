@@ -26,15 +26,31 @@
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiuerhuahuazi/dsh-mcp-progressive.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xiuerhuahuazi/dsh-mcp-progressive/issues"
+  },
+  "homepage": "https://github.com/xiuerhuahuazi/dsh-mcp-progressive#readme",
   "files": [
     "index.js",
     "client.js",
+    "lib",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
+  "dependencies": {
+    "yaml": "^2.9.1"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
