@@ -26,6 +26,9 @@ import {
   writePatchFile,
 } from '../lib/patch.js'
 
+/** A leading byte-order mark: platform-valid for `js-yaml`, rejected by npm `yaml`. */
+const BOM = '\uFEFF'
+
 /** The reviewed fixtures: `[name, input, id?]`. */
 const FIXTURES = [
   ['plain', '- id: demo\n  disabled: false\n'],
@@ -123,6 +126,28 @@ test('rewrites keep comments, CRLF line endings and block scalars', () => {
   const multilineOut = setPatchDisabled(multiline, 'demo', true)
   assert.ok(multilineOut.includes('  config: |'), 'the block scalar style survives')
   assert.equal(parseRows(multilineOut)[0].config, parseRows(multiline)[0].config, 'the block scalar value is untouched')
+})
+
+test('a BOM-prefixed patch is platform-valid and toggleable', () => {
+  const input = `${BOM}- id: demo\n  disabled: false\n`
+  // The platform parses with js-yaml, which strips the BOM; npm yaml (what
+  // these tests parse with) rejects the raw file, so the plugin strips it too.
+  assert.ok(parseDocument(input).errors.length > 0, 'npm yaml rejects a raw BOM (the bug this guards)')
+  assert.deepEqual(parseRows(input.slice(1)), [{ id: 'demo', disabled: false }])
+  assert.equal(patchDeclares(input, 'demo'), true)
+
+  const output = setPatchDisabled(input, 'demo', true)
+  assert.equal(output, `${BOM}- id: demo\n  disabled: true\n`, 'the rewrite keeps the BOM byte prefix')
+  assert.equal(effectiveTopLevel(parseRows(output.slice(1)), 'demo'), true)
+  assert.equal(setPatchDisabled(output, 'demo', true), output, 'an already-correct BOM file is not rewritten')
+})
+
+test('a BOM-only patch behaves like an empty one', () => {
+  const output = setPatchDisabled(BOM, 'demo', true)
+  assert.equal(output, BOM + setPatchDisabled('', 'demo', true))
+  assert.deepEqual(parseRows(output.slice(1)), [{ id: 'demo', disabled: true }])
+  assert.equal(patchDeclares(BOM, 'demo'), false)
+  assert.equal(patchDeclares(`${BOM}- id: demo\n`, 'demo'), true)
 })
 
 test('setPatchDisabled starts a patch from empty text', () => {
@@ -347,5 +372,28 @@ test('applyPatchOverride writes a top-level override for an insert-only home row
       { id: 'demo', disabled: true },
     ])
     assert.equal(applyPatchOverride(file, '', 'demo', true), false)
+  })
+})
+
+test('applyPatchOverride round-trips a BOM-prefixed file and keeps the prefix', async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, 'cordis.patch.yml')
+    const input = `${BOM}- id: demo\n  disabled: false\n`
+    fs.writeFileSync(file, input)
+    assert.equal(readPatchFile(file), input, 'the reader returns the real bytes including the BOM')
+
+    assert.equal(applyPatchOverride(file, '', 'demo', true), true)
+    const written = fs.readFileSync(file, 'utf8')
+    assert.equal(written, `${BOM}- id: demo\n  disabled: true\n`)
+    assert.deepEqual(parseRows(written.slice(1)), [{ id: 'demo', disabled: true }])
+    assert.equal(fs.readFileSync(file + PATCH_BACKUP_SUFFIX, 'utf8'), input, 'the backup keeps the BOM too')
+    assert.equal(applyPatchOverride(file, '', 'demo', true), false, 'already correct: the exact bytes are read back')
+    assert.equal(fs.readFileSync(file, 'utf8'), written)
+    assert.deepEqual(tempLeftovers(dir), [])
+
+    const bomOnly = path.join(dir, 'bom-only.patch.yml')
+    fs.writeFileSync(bomOnly, BOM)
+    assert.equal(applyPatchOverride(bomOnly, '', 'demo', false), true)
+    assert.equal(fs.readFileSync(bomOnly, 'utf8'), `${BOM}- id: demo\n  disabled: false\n`)
   })
 })
