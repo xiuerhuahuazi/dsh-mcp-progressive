@@ -31,8 +31,9 @@
  * State is per live Agent (Session); unloading is explicit. Loaded tools are native:
  * they go through policy/approval/timeout/post-execute exactly like first-party tools.
  *
- * No npm dependencies: tools are plain definitions registered on `ctx.tools`,
- * which also means the bundle is installable from a linked workspace directory.
+ * The only runtime dependency is `yaml`, used for patch-file editing; the tool
+ * definitions themselves are plain `ctx.tools` registrations, so the disclosure
+ * half needs nothing else from the workspace.
  *
  * The optional management half (below) also lists / starts / stops the MCP server
  * rows themselves. It is registered only when the desktop profile services exist,
@@ -740,7 +741,7 @@ export function apply(ctx, rawConfig) {
             arguments: {
               type: 'object',
               additionalProperties: true,
-              description: 'JSON arguments for the MCP tool, matching the schema that mcp_search detail:"full" prints.',
+              description: 'JSON arguments for the MCP tool, matching the schema or signature that mcp_search detail:"full" prints.',
             },
           },
           required: ['tool'],
@@ -885,10 +886,12 @@ export function apply(ctx, rawConfig) {
   // ---------------------------------------------------------------------------
   // Optional management half: list / start / stop MCP server rows.
   // The dependency scope stays inactive (and costs nothing) on hosts that do
-  // not provide the desktop profile services.
+  // not provide the desktop profile services. `connection` is part of the list
+  // on purpose: the routes are fenced by Connection's trust check, so a host
+  // that had webServer without Connection must not expose them at all.
   // ---------------------------------------------------------------------------
   if (manageServers) {
-    ctx.inject(['pluginManager', 'profileContext', 'webServer', 'loader'], (managementCtx) => {
+    ctx.inject(['pluginManager', 'profileContext', 'webServer', 'loader', 'connection'], (managementCtx) => {
       registerServerManagement(managementCtx)
     })
   }
