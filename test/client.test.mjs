@@ -117,6 +117,7 @@ const byClass = (tree, className) => findNode(tree, (node) => node.props && node
 const allByClass = (tree, className) => findAll(tree, (node) => node.props && node.props.className === className)
 const toggleButton = (tree) => findNode(tree, (node) => node.props && node.props.role === 'switch')
 const restartButton = (tree) => findNode(tree, (node) => node.props && node.props.className === 'dsh-mcp-icon-btn')
+const detailLine = (tree) => byClass(tree, 'dsh-mcp-card-detail')
 const liveRegion = (tree) => findNode(tree, (node) => node.props && node.props['aria-live'] === 'polite')
 
 test('a failed action stays visible after a following successful poll', async () => {
@@ -440,6 +441,167 @@ test('a failed load keeps the banner and Retry', async () => {
     banner = byClass(mounted.panel.render(), 'dsh-mcp-failure')
     assert.equal(banner, undefined)
     assert.equal(toggleButton(mounted.panel.render()).props['aria-checked'], 'true')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a running row without live data renders exactly as before', async () => {
+  const row = serverRow({ live: null, statusDetail: null })
+  const mounted = mountPanel({ fetch: async () => response(stateBody([row])) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const tag = byClass(tree, 'dsh-mcp-tag')
+    assert.equal(textOf(tag), 'running')
+    assert.equal(tag.props['data-tone'], 'success')
+    assert.equal(textOf(byClass(tree, 'dsh-mcp-card-desc')), 'stdio · node server.js · 2 tools')
+    assert.equal(detailLine(tree), undefined, 'no second line without a Host detail')
+    assert.equal(tag.props.title, 'status: running')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('an older Host row without live/statusDetail fields still renders', async () => {
+  const row = serverRow()
+  delete row.live
+  delete row.statusDetail
+  const mounted = mountPanel({ fetch: async () => response(stateBody([row])) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    assert.equal(textOf(byClass(tree, 'dsh-mcp-tag')), 'running')
+    assert.equal(detailLine(tree), undefined)
+    assert.doesNotMatch(textOf(tree), /\bundefined\b/)
+    assert.equal(toggleButton(tree).props['aria-checked'], 'true')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a reconnecting starting row names the attempt and hints the retry', async () => {
+  const row = serverRow({
+    status: 'starting',
+    toolCount: 0,
+    live: { state: 'reconnecting', attempt: 2, maxAttempts: 5, nextRetryAtMs: 3001 },
+  })
+  const fetch = async (url, init) =>
+    response(stateBody([row], init !== undefined && init.method === 'POST' ? { now: 3001 } : { now: 1 }))
+  const mounted = mountPanel({ fetch })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const tag = byClass(tree, 'dsh-mcp-tag')
+    assert.equal(textOf(tag), 'reconnecting (attempt 2/5)')
+    assert.equal(tag.props['data-tone'], 'warning', 'a reconnect is still a start, not a new tone')
+
+    const detail = detailLine(tree)
+    assert.ok(detail !== undefined, 'the next retry must be visible')
+    assert.equal(textOf(detail), 'retry in 3s')
+    assert.equal(detail.props.title, 'retry in 3s')
+    assert.equal(String(tag.props.title), 'status: reconnecting (attempt 2/5) — retry in 3s')
+
+    // An in-flight action keeps its own verb; only the settled state speaks live.
+    const pending = toggleButton(tree).props.onClick()
+    assert.equal(textOf(byClass(mounted.panel.render(), 'dsh-mcp-tag')), 'Stopping…')
+    await pending
+    await flushMicrotasks()
+    assert.equal(textOf(byClass(mounted.panel.render(), 'dsh-mcp-tag')), 'reconnecting (attempt 2/5)')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a starting row waiting for credentials says so', async () => {
+  const row = serverRow({
+    status: 'starting',
+    live: { state: 'waiting-credentials', lastError: 'missing ${credential:token}' },
+  })
+  const mounted = mountPanel({ fetch: async () => response(stateBody([row])) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const tag = byClass(tree, 'dsh-mcp-tag')
+    assert.equal(textOf(tag), 'waiting for credentials')
+    assert.equal(tag.props['data-tone'], 'warning')
+
+    const detail = detailLine(tree)
+    assert.ok(detail !== undefined, 'the credential problem must be visible')
+    assert.match(textOf(detail), /\$\{credential:token\}/)
+    assert.equal(String(tag.props.title), 'status: waiting for credentials — missing ${credential:token}')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('an error row shows the Host detail on the card and in the tag hint', async () => {
+  const statusDetail = 'failed: gave-up · spawn ENOENT'
+  const row = serverRow({
+    status: 'error',
+    live: { state: 'failed', reason: 'gave-up', lastError: 'spawn ENOENT' },
+    statusDetail,
+  })
+  const mounted = mountPanel({ fetch: async () => response(stateBody([row])) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const tag = byClass(tree, 'dsh-mcp-tag')
+    assert.equal(textOf(tag), 'error')
+    assert.equal(tag.props['data-tone'], 'danger')
+    assert.equal(String(tag.props.title), 'status: error — ' + statusDetail)
+
+    const detail = detailLine(tree)
+    assert.ok(detail !== undefined)
+    assert.equal(textOf(detail), statusDetail)
+    assert.equal(detail.props.title, statusDetail, 'the full string stays available to the tooltip')
+    assert.doesNotMatch(textOf(tree), /\bundefined\b/)
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('an error row without a Host detail falls back to live.lastError', async () => {
+  const row = serverRow({
+    status: 'error',
+    diagnostic: undefined,
+    statusDetail: null,
+    live: { state: 'failed', reason: 'gave-up', lastError: 'spawn ENOENT' },
+  })
+  const mounted = mountPanel({ fetch: async () => response(stateBody([row])) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const detail = detailLine(tree)
+    assert.ok(detail !== undefined, 'an old Host still explains the failure')
+    assert.equal(textOf(detail), 'failed: gave-up · spawn ENOENT')
+    assert.equal(String(byClass(tree, 'dsh-mcp-tag').props.title), 'status: error — failed: gave-up · spawn ENOENT')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a detail that disappears between polls is removed cleanly', async () => {
+  let polls = 0
+  const fetch = async () => {
+    polls += 1
+    return polls === 1
+      ? response(stateBody([serverRow({ live: { state: 'connected', toolCount: 2 }, statusDetail: 'connected · 2 tools' })]))
+      : response(stateBody([serverRow({ live: null, statusDetail: null })]))
+  }
+  const mounted = mountPanel({ fetch })
+  try {
+    await flushMicrotasks()
+    assert.equal(textOf(detailLine(mounted.panel.render())), 'connected · 2 tools')
+
+    await mounted.panel.poll()
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    assert.equal(detailLine(tree), undefined)
+    assert.equal(textOf(byClass(tree, 'dsh-mcp-tag')), 'running')
+    assert.doesNotMatch(textOf(tree), /\bundefined\b/)
+    assert.doesNotMatch(textOf(tree), /\bnull\b/)
+    assert.equal(toggleButton(tree).props['aria-checked'], 'true')
   } finally {
     mounted.panel.unmount()
   }
