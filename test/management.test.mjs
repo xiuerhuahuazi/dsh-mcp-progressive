@@ -26,8 +26,13 @@ import {
   boundedDeadline,
   createControlQueue,
   isMcpClientModule,
+  liveStatusOf,
+  liveStatusView,
+  presentServer,
   readJsonBody,
+  renderServerList,
   resolveServerTarget,
+  sanitizeLiveStatus,
   serverStatus,
   targetSummary,
   waitForServerPhase,
@@ -1098,4 +1103,407 @@ test('F1b: a failed restart of an already-disabled server performs no rollback w
   const rewritten = parse(fs.readFileSync(homePatch, 'utf8'))
   assert.equal(rewritten.find((entry) => entry?.id === 'demo')?.disabled, false)
   assert.equal(env.calls.length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// Live connection status (1.3.0).
+//
+// The Loader entry's own `moduleNamespace` is the only route to the RUNNING
+// mcp-client instance; these fixtures expose the same
+// `connectionStatusOf(fiber) → { current(), onChange() }` seam the real client
+// does, with `onChange` throwing so a subscription attempt fails the test.
+// ---------------------------------------------------------------------------
+
+/**
+ * One Loader entry whose module namespace exposes a live status cell.
+ *
+ * @param {string} id entry id
+ * @param {object|Function|null} statusOrThunk the status `current()` returns
+ * @param {object} [overrides] entry fields the test wants to replace
+ * @returns {{entry: object, fibers: object[], onChangeCalls: number}}
+ */
+function liveEntry(id, statusOrThunk, overrides = {}) {
+  const fibers = []
+  let onChangeCalls = 0
+  const entry = {
+    id,
+    options: { config: { serverName: id.split(':').pop(), command: 'node' } },
+    moduleNamespace: {
+      connectionStatusOf(fiber) {
+        fibers.push(fiber)
+        return {
+          current() {
+            if (typeof statusOrThunk === 'function') return statusOrThunk()
+            return statusOrThunk
+          },
+          onChange() {
+            onChangeCalls += 1
+            throw new Error('live status must be read, never subscribed')
+          },
+        }
+      },
+    },
+    // The entry's fiber is the `ctx.plugin()` handle: the real fiber sits behind
+    // `fiber.ctx.fiber`, which is the key of the client's status WeakMap.
+    fiber: { ctx: { fiber: { tag: id } } },
+    ...overrides,
+  }
+  return {
+    entry,
+    fibers,
+    get onChangeCalls() {
+      return onChangeCalls
+    },
+  }
+}
+
+test('liveStatusView maps every MCP state onto the public vocabulary and a one-line detail', () => {
+  const now = 1_700_000_000_000
+  const view = (live, overrides = {}) => liveStatusView({ enabled: true, live, ...overrides }, now)
+
+  assert.deepEqual(view({ state: 'connected', toolCount: 3, connectedAt: now }), { status: 'running', detail: null })
+  assert.deepEqual(view({ state: 'connected', toolCount: 0, connectedAt: now }), { status: 'idle', detail: null })
+  assert.deepEqual(view({ state: 'connecting', attempt: 0 }), { status: 'starting', detail: 'connecting (attempt 1)' })
+  assert.deepEqual(
+    view({ state: 'reconnecting', attempt: 2, maxAttempts: 5, nextRetryAtMs: now + 3000, lastError: 'spawn ENOENT' }),
+    { status: 'starting', detail: 'reconnecting (attempt 2/5) · retry in 3s · spawn ENOENT' },
+  )
+  assert.deepEqual(
+    view({ state: 'reconnecting', attempt: 1, maxAttempts: 3, nextRetryAtMs: now - 500 }),
+    { status: 'starting', detail: 'reconnecting (attempt 1/3)' },
+    'a retry time already in the past is not advertised',
+  )
+  assert.deepEqual(
+    view({ state: 'reconnecting', attempt: 1 }),
+    { status: 'starting', detail: 'reconnecting' },
+    'an incomplete status degrades instead of inventing numbers',
+  )
+  assert.deepEqual(view({ state: 'waiting-credentials', lastError: 'missing token' }), {
+    status: 'starting',
+    detail: 'waiting for credentials',
+  })
+  assert.deepEqual(view({ state: 'closed' }), { status: 'starting', detail: 'closed' })
+  assert.deepEqual(view({ state: 'failed', reason: 'gave-up', lastError: 'spawn ENOENT' }), {
+    status: 'error',
+    detail: 'failed: gave-up · spawn ENOENT',
+  })
+  assert.deepEqual(view({ state: 'failed', reason: 'reconnect-disabled' }), {
+    status: 'error',
+    detail: 'failed: reconnect-disabled',
+  })
+
+  // Nothing usable: the inferred status stays in charge, exactly as before.
+  assert.equal(liveStatusView({ enabled: true }, now), null)
+  assert.equal(liveStatusView({ enabled: true, live: null }, now), null)
+  assert.equal(liveStatusView({ enabled: true, live: { state: 'from-the-future' } }, now), null)
+  assert.equal(liveStatusView({ enabled: true, live: {} }, now), null)
+  // A row configured off is stopped no matter what its last cell says.
+  assert.equal(liveStatusView({ enabled: false, live: { state: 'connected', toolCount: 3 } }, now), null)
+  // An unloading row is "stopping", never the live state.
+  assert.equal(liveStatusView({ enabled: true, fiberPhase: 'unloading', live: { state: 'connected', toolCount: 3 } }, now), null)
+})
+
+test('serverStatus prefers the live status and keeps the inference when it is absent', () => {
+  assert.equal(serverStatus({ enabled: true, fiberPhase: 'active', toolCount: 3 }), 'running')
+  assert.equal(serverStatus({ enabled: true, fiberPhase: 'active', toolCount: 0 }), 'idle')
+  assert.equal(serverStatus({ enabled: true, fiberPhase: 'active', toolCount: 3, live: { state: 'failed', reason: 'gave-up' } }), 'error')
+  assert.equal(serverStatus({ enabled: true, fiberPhase: 'active', toolCount: 0, live: { state: 'connected', toolCount: 0 } }), 'idle')
+  assert.equal(serverStatus({ enabled: true, fiberPhase: 'active', toolCount: 0, live: { state: 'connected', toolCount: 2 } }), 'running')
+  assert.equal(serverStatus({ enabled: true, fiberPhase: 'active', toolCount: 0, live: { state: 'reconnecting', attempt: 1, maxAttempts: 2 } }), 'starting')
+  assert.equal(serverStatus({ enabled: true, fiberPhase: 'active', toolCount: 0, live: { state: 'closed' } }), 'starting')
+  assert.equal(serverStatus({ enabled: false, fiberPhase: null, live: { state: 'connected', toolCount: 2 } }), 'stopped')
+  assert.equal(serverStatus({ enabled: true, fiberPhase: 'active', toolCount: 2, live: { state: 'bogus' } }), 'running', 'an unknown state falls back')
+  assert.equal(serverStatus({ enabled: true }), 'unknown')
+})
+
+test('sanitizeLiveStatus keeps only the documented fields and bounded text', () => {
+  assert.deepEqual(
+    sanitizeLiveStatus({
+      state: 'reconnecting',
+      attempt: 2,
+      maxAttempts: Number.POSITIVE_INFINITY,
+      nextRetryAtMs: Number.NaN,
+      toolCount: -1,
+      connectedAt: 1,
+      reason: 42,
+      lastError: 'spawn ENOENT\nat /very/long/path',
+      secret: 'SYNTHETIC_SECRET',
+      extra: { nested: true },
+    }),
+    {
+      state: 'reconnecting',
+      toolCount: -1,
+      connectedAt: 1,
+      attempt: 2,
+      lastError: 'spawn ENOENT at /very/long/path',
+    },
+    'infinite/NaN numbers, non-string text and unknown fields are dropped',
+  )
+  assert.equal(sanitizeLiveStatus(null), null)
+  assert.equal(sanitizeLiveStatus('connected'), null)
+  assert.equal(sanitizeLiveStatus({}), null)
+  assert.equal(sanitizeLiveStatus({ state: '' }), null)
+  assert.equal(liveStatusOf(undefined), null, 'a row without a Loader entry has no live status')
+})
+
+test('the status detail clips a long lastError to one bounded line', () => {
+  const longError = `spawn ENOENT at /very/long/path/${'x'.repeat(400)}\nsecond line`
+  const view = liveStatusView({ enabled: true, live: { state: 'failed', reason: 'gave-up', lastError: longError } })
+  assert.match(view.detail, /^failed: gave-up · spawn ENOENT at \/very\/long\/path\//)
+  assert.ok(view.detail.length <= 140, `detail is bounded (length ${view.detail.length})`)
+  assert.ok(!view.detail.includes('\n'))
+})
+
+test('the state route reports a reconnecting row as starting with its live detail', async (t) => {
+  const nextRetryAtMs = Date.now() + 3000
+  const { entry, fibers, onChangeCalls } = liveEntry('include:demo', {
+    state: 'reconnecting',
+    attempt: 2,
+    maxAttempts: 5,
+    nextRetryAtMs,
+    lastError: 'spawn ENOENT',
+    secret: 'SYNTHETIC_SECRET',
+  })
+  const env = await createManagementEnv({ rows: [row()], entries: [entry] })
+  t.after(() => env.dispose())
+
+  const response = await request(env, STATE)
+  assert.equal(response.status, 200)
+  const server = response.body.servers[0]
+  assert.equal(server.status, 'starting')
+  assert.equal(server.statusDetail, `reconnecting (attempt 2/5) · retry in 3s · spawn ENOENT`)
+  assert.deepEqual(server.live, { state: 'reconnecting', attempt: 2, maxAttempts: 5, nextRetryAtMs, lastError: 'spawn ENOENT' })
+  assert.equal(server.toolCount, 3, 'not connected: the registry prefix count is kept')
+  assert.equal(server.diagnostic, null, 'a connection failure is not a fiber diagnostic')
+  assert.deepEqual(fibers, [{ tag: 'include:demo' }], 'the read is normalized to fiber.ctx.fiber')
+  assert.equal(onChangeCalls, 0, 'reading must never subscribe')
+  assert.ok(!JSON.stringify(response.body).includes('SYNTHETIC_SECRET'), 'a status cannot smuggle fields into the payload')
+  assert.equal(env.calls.length, 0)
+})
+
+test('a connected row is running or idle by the live tool count, which wins over the prefix count', async (t) => {
+  const rows = [
+    row({ entryId: 'include:demo', patchId: 'demo' }),
+    row({ entryId: 'include:idle', patchId: 'idle', toolCount: 0 }),
+  ]
+  const entries = [
+    liveEntry('include:demo', { state: 'connected', toolCount: 7, connectedAt: 1_700_000_000_000 }).entry,
+    liveEntry('include:idle', { state: 'connected', toolCount: 0, connectedAt: 1_700_000_000_000 }).entry,
+  ]
+  const env = await createManagementEnv({ rows, entries })
+  t.after(() => env.dispose())
+
+  const response = await request(env, STATE)
+  assert.equal(response.status, 200)
+  const byName = new Map(response.body.servers.map((server) => [server.serverName, server]))
+
+  const demo = byName.get('demo')
+  assert.equal(demo.status, 'running')
+  assert.equal(demo.toolCount, 7, 'the live generation count wins over the 3 prefix matches')
+  assert.equal(demo.live.toolCount, 7)
+  assert.equal(demo.statusDetail, null)
+
+  const idle = byName.get('idle')
+  assert.equal(idle.status, 'idle')
+  assert.equal(idle.toolCount, 0)
+  assert.equal(idle.statusDetail, null)
+})
+
+test('a failed live status is an error and a disabled row stays stopped', async (t) => {
+  const rows = [
+    row({ entryId: 'include:broken', patchId: 'broken', toolCount: 0 }),
+    row({ entryId: 'include:off', patchId: 'off', enabled: false, fiberPhase: null, toolCount: 0 }),
+  ]
+  const entries = [
+    liveEntry('include:broken', { state: 'failed', reason: 'gave-up', lastError: 'spawn ENOENT' }).entry,
+    liveEntry('include:off', { state: 'connected', toolCount: 4, connectedAt: 1 }).entry,
+  ]
+  const env = await createManagementEnv({ rows, entries })
+  t.after(() => env.dispose())
+
+  const response = await request(env, STATE)
+  assert.equal(response.status, 200)
+  const byName = new Map(response.body.servers.map((server) => [server.serverName, server]))
+
+  const broken = byName.get('broken')
+  assert.equal(broken.status, 'error')
+  assert.equal(broken.statusDetail, 'failed: gave-up · spawn ENOENT')
+  assert.equal(broken.live.reason, 'gave-up')
+  assert.equal(broken.live.lastError, 'spawn ENOENT')
+
+  const off = byName.get('off')
+  assert.equal(off.status, 'stopped', 'a row configured off never reports the live state')
+  assert.equal(off.statusDetail, null)
+  assert.equal(off.live.state, 'connected', 'its last cell is still reported as data')
+})
+
+test('a Loader entry without a usable live-status seam falls back cleanly (older DSH)', async (t) => {
+  const config = { config: { serverName: 'demo', command: 'node' } }
+  const entries = [
+    // No module namespace at all (a Loader this version does not expose).
+    { id: 'include:plain', options: config },
+    // A namespace without the seam (group/builtin rows look like this).
+    { id: 'include:ns', options: config, moduleNamespace: { apply() {} }, fiber: { ctx: { fiber: {} } } },
+    // The seam exists but is not a function.
+    { id: 'include:notfn', options: config, moduleNamespace: { connectionStatusOf: 'nope' }, fiber: { ctx: { fiber: {} } } },
+  ]
+  const rows = ['plain', 'ns', 'notfn'].map((name) => row({ entryId: `include:${name}`, patchId: name }))
+  const env = await createManagementEnv({ rows, entries })
+  t.after(() => env.dispose())
+
+  const response = await request(env, STATE)
+  assert.equal(response.status, 200)
+  for (const server of response.body.servers) {
+    assert.equal(server.live, null, `${server.serverName} has no live status`)
+    assert.equal(server.statusDetail, null)
+    assert.equal(server.status, 'running', 'the pre-1.3 inference is unchanged')
+    assert.equal(server.toolCount, 3)
+  }
+  assert.equal(env.calls.length, 0)
+})
+
+test('a throwing or empty live read falls back instead of failing the request', async (t) => {
+  const config = () => ({ config: { serverName: 'demo', command: 'node' } })
+  const entries = [
+    {
+      id: 'include:throws',
+      options: config(),
+      moduleNamespace: {
+        connectionStatusOf() {
+          throw new Error('synthetic read failure')
+        },
+      },
+      fiber: { ctx: { fiber: {} } },
+    },
+    { id: 'include:undef', options: config(), moduleNamespace: { connectionStatusOf: () => undefined }, fiber: { ctx: { fiber: {} } } },
+    { id: 'include:nocurrent', options: config(), moduleNamespace: { connectionStatusOf: () => ({}) }, fiber: { ctx: { fiber: {} } } },
+    liveEntry('include:currentthrows', () => {
+      throw new Error('cell exploded')
+    }, { options: config() }).entry,
+    liveEntry('include:garbage', { state: 42 }, { options: config() }).entry,
+  ]
+  const rows = ['throws', 'undef', 'nocurrent', 'currentthrows', 'garbage']
+    .map((name) => row({ entryId: `include:${name}`, patchId: name }))
+  const env = await createManagementEnv({ rows, entries })
+  t.after(() => env.dispose())
+
+  const response = await request(env, STATE)
+  assert.equal(response.status, 200)
+  for (const server of response.body.servers) {
+    assert.equal(server.live, null, `${server.serverName} fell back`)
+    assert.equal(server.statusDetail, null)
+    assert.equal(server.status, 'running', 'the inference still answers')
+  }
+
+  // The raw helper itself never throws either, and a fiber without `ctx` is
+  // passed through unchanged.
+  const plainFiber = { plain: true }
+  let received = null
+  const direct = liveStatusOf({
+    fiber: plainFiber,
+    moduleNamespace: {
+      connectionStatusOf(fiber) {
+        received = fiber
+        return { current: () => ({ state: 'closed' }) }
+      },
+    },
+  })
+  assert.deepEqual(direct, { state: 'closed' })
+  assert.equal(received, plainFiber, 'a fiber that has no ctx is passed through as-is')
+})
+
+test('presentServer carries live and statusDetail without changing the rest of the contract', () => {
+  const presented = presentServer({
+    entryId: 'include:demo',
+    id: 'demo',
+    serverName: 'demo',
+    transport: 'stdio',
+    target: 'node',
+    enabled: true,
+    fiberPhase: 'active',
+    toolCount: 0,
+    live: { state: 'failed', reason: 'gave-up', lastError: 'spawn ENOENT' },
+    diagnostic: null,
+  })
+  assert.deepEqual(presented, {
+    entryId: 'include:demo',
+    id: 'demo',
+    serverName: 'demo',
+    transport: 'stdio',
+    target: 'node',
+    enabled: true,
+    fiberPhase: 'active',
+    live: { state: 'failed', reason: 'gave-up', lastError: 'spawn ENOENT' },
+    toolCount: 0,
+    status: 'error',
+    statusDetail: 'failed: gave-up · spawn ENOENT',
+    diagnostic: null,
+  })
+
+  const plain = presentServer({
+    entryId: null, id: 'x', serverName: 'x', transport: 'stdio', target: '', enabled: true, fiberPhase: 'active', toolCount: 2,
+  })
+  assert.equal(plain.live, null)
+  assert.equal(plain.statusDetail, null)
+  assert.equal(plain.status, 'running')
+})
+
+test('the model-facing text appends the live status detail', async (t) => {
+  const { entry } = liveEntry('include:demo', { state: 'failed', reason: 'gave-up', lastError: 'spawn ENOENT' })
+  const env = await createManagementEnv({ rows: [row()], entries: [entry] })
+  t.after(() => env.dispose())
+
+  const list = env.ctx.tools.definitions().find((candidate) => candidate.name === 'mcp_servers')
+  const text = await list.execute({})
+  assert.match(text, /^MCP servers \(1\):$/m)
+  assert.match(text, /- demo \(row demo\): error — failed: gave-up · spawn ENOENT, 3 tools — stdio node/)
+
+  const detail = liveStatusView({
+    enabled: true,
+    live: { state: 'reconnecting', attempt: 1, maxAttempts: 3, nextRetryAtMs: Date.now() + 5000, lastError: 'connect ECONNREFUSED' },
+  })
+  const rendered = renderServerList([{
+    id: 'demo',
+    serverName: 'demo',
+    transport: 'stdio',
+    target: '',
+    enabled: true,
+    fiberPhase: 'active',
+    toolCount: 0,
+    live: { state: 'reconnecting', attempt: 1, maxAttempts: 3, nextRetryAtMs: Date.now() + 5000, lastError: 'connect ECONNREFUSED' },
+  }])
+  assert.ok(rendered.includes(`starting — ${detail.detail}`))
+  assert.equal(rendered.split('\n').length, 3, 'the detail is one line and the list keeps its shape')
+})
+
+test('the mcp_server result text carries the live detail in its trailing list', async (t) => {
+  const { entry } = liveEntry('include:demo', { state: 'failed', reason: 'gave-up', lastError: 'spawn ENOENT' })
+  const env = await createManagementEnv({
+    rows: [row({ enabled: false, fiberPhase: null, toolCount: 0 })],
+    entries: [entry],
+    mutate(fakeRow, enabled) {
+      fakeRow.enabled = enabled
+      fakeRow.fiberPhase = enabled ? 'active' : null
+      return { application: 'applied' }
+    },
+  })
+  t.after(() => env.dispose())
+
+  const definition = env.ctx.tools.definitions().find((candidate) => candidate.name === 'mcp_server')
+  const text = await definition.execute({ server: 'demo', action: 'start' })
+  assert.match(text, /start: applied; observed error/)
+  assert.match(text, /- demo \(row demo\): error — failed: gave-up · spawn ENOENT/)
+})
+
+test('reading live status never reaches a write path', async (t) => {
+  const { entry } = liveEntry('include:demo', { state: 'failed', reason: 'gave-up', lastError: 'spawn ENOENT' })
+  const env = await createManagementEnv({ rows: [row()], entries: [entry] })
+  t.after(() => env.dispose())
+  const patchBefore = fs.readFileSync(env.patchPath, 'utf8')
+
+  for (let index = 0; index < 3; index += 1) await request(env, STATE)
+
+  assert.equal(env.calls.length, 0, 'no setPluginEnabled call may follow a read')
+  assert.equal(env.row.enabled, true)
+  assert.equal(fs.readFileSync(env.patchPath, 'utf8'), patchBefore, 'no patch write may follow a read')
 })
