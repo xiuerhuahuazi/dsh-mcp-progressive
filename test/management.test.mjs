@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
 import nodePath from 'node:path'
 import test from 'node:test'
@@ -16,11 +17,16 @@ import { parse } from 'yaml'
 
 import { MANAGEMENT_ROUTES, createManagementEnv, request, withVirtualClock } from './harness.mjs'
 import {
+  MANAGER_CALL_MS,
   MCP_CLIENT_MODULE,
   MAX_PENDING_OPERATIONS,
   QueueFullError,
+  SERVER_WAIT_MS,
+  awaitBounded,
+  boundedDeadline,
   createControlQueue,
   isMcpClientModule,
+  readJsonBody,
   resolveServerTarget,
   serverStatus,
   targetSummary,
@@ -783,4 +789,264 @@ test('a row locked by the Harness without a writable declaration is a 409', asyn
   assert.equal(response.status, 409)
   assert.match(response.body.error, /locked by this Harness/)
   assert.equal(env.calls.length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// Security-audit regressions: F1 (restart abort rollback), F3 (per-call bound),
+// F4 (queue deadline), F7 (stale observed tool count), F8 (body-read abort).
+// ---------------------------------------------------------------------------
+
+/** Open one registered route with a raw req/res pair the test can abort mid-flight. */
+function openRoute(env, routePath) {
+  const handler = env.routes.get(routePath)
+  if (handler === undefined) throw new Error(`route not registered: ${routePath}`)
+  const req = new EventEmitter()
+  Object.assign(req, {
+    headers: { host: '127.0.0.1:53809', 'content-type': 'application/json' },
+    method: 'POST',
+    url: routePath,
+    destroyed: false,
+    destroy() {
+      this.destroyed = true
+    },
+  })
+  const res = new EventEmitter()
+  Object.assign(res, {
+    headersSent: false,
+    writableFinished: false,
+    writeHead(status) {
+      this.status = status
+      this.headersSent = true
+      return this
+    },
+    end(payload) {
+      this.raw = payload
+      this.writableFinished = true
+      return this
+    },
+  })
+  const pending = handler(req, res)
+  return { req, res, pending }
+}
+
+/** Feed one complete JSON body to a raw request opened by `openRoute`. */
+function sendBody(req, body) {
+  req.emit('data', Buffer.from(JSON.stringify(body)))
+  req.emit('end')
+}
+
+/** The JSON answer a raw response received, if any. */
+function answerOf(res) {
+  return typeof res.raw === 'string' ? JSON.parse(res.raw) : undefined
+}
+
+/** Settle a promise or fail the test; the timer is cleared so the process can exit. */
+function within(promise, ms, label) {
+  let timer
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not settle within ${ms} ms`)), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+}
+
+test('F1: an abort mid-restart restores the preference instead of leaving disabled: true', async (t) => {
+  const env = await createManagementEnv({ rows: [row({ enabled: true, fiberPhase: 'active', readOnlyReason: 'unaddressable' })] })
+  t.after(() => env.dispose())
+  const homePatch = nodePath.join(env.home, 'cordis.patch.yml')
+  fs.writeFileSync(
+    homePatch,
+    '- insert:\n    - id: demo\n      name: "@deepseek-ai/dsh-mcp-client"\n      config:\n        serverName: demo\n        command: node\n',
+    'utf8',
+  )
+
+  const { req, res, pending } = openRoute(env, RESTART)
+  sendBody(req, { entryId: 'include:demo' })
+  // The row never unloads, so the stop step is still waiting for its phase here.
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  assert.match(fs.readFileSync(homePatch, 'utf8'), /disabled: true/, 'the stop persisted disabled: true before the abort')
+
+  res.emit('close') // the panel's 10 s deadline or an unmount
+  await within(pending, 5000, 'aborted restart')
+
+  const answer = answerOf(res)
+  assert.equal(res.status, 500)
+  assert.equal(answer.ok, false)
+  assert.match(answer.error, /restart aborted/)
+  assert.equal(answer.rollback, 'preference-restored')
+  const rewritten = parse(fs.readFileSync(homePatch, 'utf8'))
+  const override = rewritten.find((entry) => entry?.id === 'demo')
+  assert.ok(override, 'the row stays declared in the home patch')
+  assert.equal(override.disabled, false, 'the persisted preference must not drift to disabled')
+  assert.equal(env.calls.length, 0)
+})
+
+test('F1: an abort at the stop/start boundary restores the pre-restart preference', async (t) => {
+  let env = null
+  let activeRes = null
+  let disabledReads = 0
+  env = await createManagementEnv({
+    rows: [row({ enabled: true, fiberPhase: 'active', readOnlyReason: 'unaddressable' })],
+    entries: [{ id: 'include:demo', options: { config: { serverName: 'demo', command: 'node' } } }],
+    manager: {
+      // HMR stand-in: the row follows the home patch.
+      async listPlugins() {
+        const entriesNow = parse(fs.readFileSync(nodePath.join(env.home, 'cordis.patch.yml'), 'utf8'))
+        const override = entriesNow.find((entry) => entry?.id === 'demo')
+        const enabled = override?.disabled !== true
+        const live = {
+          entryId: 'include:demo',
+          patchId: 'demo',
+          moduleName: MCP_CLIENT_MODULE,
+          enabled,
+          fiberPhase: enabled ? 'active' : null,
+          toolCount: 0,
+          readOnlyReason: 'unaddressable',
+        }
+        if (!enabled) {
+          disabledReads += 1
+          if (disabledReads >= 2) {
+            // The stop is done; hold the start-step read so the abort lands at
+            // the stop/start boundary, before the start writes a preference.
+            setTimeout(() => activeRes?.emit('close'), 10)
+            return new Promise((resolve) => setTimeout(() => resolve([live]), 80))
+          }
+        }
+        return [live]
+      },
+      async setPluginEnabled() {
+        throw new Error('the home patch owns this row')
+      },
+    },
+  })
+  t.after(() => env.dispose())
+  const homePatch = nodePath.join(env.home, 'cordis.patch.yml')
+  fs.writeFileSync(
+    homePatch,
+    '- insert:\n    - id: demo\n      name: "@deepseek-ai/dsh-mcp-client"\n      config:\n        serverName: demo\n        command: node\n',
+    'utf8',
+  )
+
+  const opened = openRoute(env, RESTART)
+  activeRes = opened.res
+  sendBody(opened.req, { entryId: 'include:demo' })
+  await within(opened.pending, 5000, 'boundary abort')
+
+  const answer = answerOf(opened.res)
+  assert.equal(opened.res.status, 500)
+  assert.match(answer.error, /restart aborted/)
+  assert.equal(answer.rollback, 'preference-restored')
+  const rewritten = parse(fs.readFileSync(homePatch, 'utf8'))
+  assert.equal(rewritten.find((entry) => entry?.id === 'demo')?.disabled, false)
+  assert.equal(env.calls.length, 0)
+})
+
+test('F3: boundedDeadline takes the earlier of the operation and per-call budgets', () => {
+  assert.equal(boundedDeadline({}, 0), MANAGER_CALL_MS, 'the per-call constant is the default bound')
+  assert.equal(boundedDeadline({ deadline: 1_000_000, timeoutMs: 50 }, 0), 50, 'the per-call budget wins over a longer operation')
+  assert.equal(boundedDeadline({ deadline: 10, timeoutMs: 50 }, 0), 10, 'a shorter operation budget still wins')
+  assert.equal(boundedDeadline({ deadline: 1_000 }, 0), 1_000)
+})
+
+test('F3: a hung listPlugins fails on the per-call budget, not the 30 s operation deadline', async () => {
+  const hung = new Promise(() => {})
+  const started = Date.now()
+  await assert.rejects(
+    awaitBounded(hung, { deadline: Date.now() + SERVER_WAIT_MS, timeoutMs: 50, label: 'listPlugins' }),
+    (error) => error?.status === 504 && /listPlugins did not answer in time/.test(error.message),
+  )
+  const elapsed = Date.now() - started
+  assert.ok(elapsed >= 40 && elapsed < 1500, `per-call bound must fire near its own 50 ms budget (took ${elapsed} ms)`)
+})
+
+test('F4: a queued operation gets its budget when it starts, not when it joined the queue', async (t) => {
+  let releaseFirst
+  const gate = new Promise((resolve) => {
+    releaseFirst = resolve
+  })
+  let managerCalls = 0
+  const env = await createManagementEnv({
+    rows: [row({ enabled: true, fiberPhase: 'active' })],
+    mutate(fakeRow, enabled) {
+      managerCalls += 1
+      if (managerCalls === 1) return gate
+      fakeRow.enabled = enabled
+      fakeRow.fiberPhase = enabled ? 'active' : null
+      return { application: 'applied' }
+    },
+  })
+  t.after(() => env.dispose())
+
+  const [held, queued] = await withVirtualClock(1_000, async () => {
+    const first = post(env, TOGGLE, { entryId: 'include:demo', enabled: false })
+    const second = post(env, TOGGLE, { entryId: 'include:demo', enabled: false })
+    // Let both handlers join the queue while the head is gated.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    // Burn well past the second request's enqueue-time 30 s budget.
+    for (let index = 0; index < 40; index += 1) Date.now()
+    releaseFirst()
+    return Promise.all([first, second])
+  })
+
+  assert.notEqual(held.status, 200, 'the gated head fails')
+  assert.equal(queued.status, 200, 'the queued operation must run with a fresh budget, not 504')
+  assert.equal(queued.body.ok, true)
+  assert.equal(queued.body.result.applied, true)
+  assert.equal(queued.body.result.observedStatus, 'stopped')
+  assert.equal(managerCalls, 2)
+})
+
+test('F7: a started server reports the freshly observed tool count, not "idle"', async (t) => {
+  let env = null
+  env = await createManagementEnv({
+    rows: [row({ enabled: false, fiberPhase: null, toolCount: 0 })],
+    entries: [{ id: 'include:demo', options: { config: { serverName: 'fresh', command: 'node' } } }],
+    mutate(fakeRow, enabled) {
+      fakeRow.enabled = enabled
+      fakeRow.fiberPhase = enabled ? 'active' : null
+      // The started server exposes a tool; the pre-operation snapshot could not
+      // know that, the live registry can.
+      env.ctx.tools.register({
+        name: 'mcp__fresh__ping',
+        description: 'ping',
+        parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+      })
+      return { application: 'applied' }
+    },
+  })
+  t.after(() => env.dispose())
+
+  const response = await post(env, TOGGLE, { entryId: 'include:demo', enabled: true })
+  assert.equal(response.status, 200)
+  const result = resultOf(response)
+  assert.equal(result.observedStatus, 'running', 'a server that loaded tools is running, not idle')
+  assert.equal(response.body.servers[0].toolCount, 1)
+  assert.equal(response.body.servers[0].status, 'running')
+})
+
+test('F8: a client disconnect mid-body rejects the read and never reaches the manager', async (t) => {
+  const env = await createManagementEnv()
+  t.after(() => env.dispose())
+  const patchBefore = fs.readFileSync(env.patchPath, 'utf8')
+
+  for (const event of ['close', 'aborted']) {
+    const { req, res, pending } = openRoute(env, TOGGLE)
+    req.emit('data', Buffer.from('{"entryId":"include:demo",'))
+    // No 'end': the client vanishes in the middle of the body.
+    req.emit(event)
+    await within(pending, 2000, `mid-body ${event}`)
+    assert.equal(res.status, 500, `a mid-body ${event} answers instead of hanging`)
+    assert.match(answerOf(res).error, /aborted/)
+  }
+
+  assert.equal(env.calls.length, 0)
+  assert.equal(env.row.enabled, true)
+  assert.equal(fs.readFileSync(env.patchPath, 'utf8'), patchBefore)
+})
+
+test('F8: readJsonBody rejects with an AbortError on a premature close', async () => {
+  const req = new EventEmitter()
+  const reading = readJsonBody(req)
+  req.emit('data', Buffer.from('{"partial":'))
+  req.emit('close')
+  await assert.rejects(reading, (error) => error?.name === 'AbortError')
 })
