@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.2.1] - 2026-11-19
 
+Distribution: 1.2.1 was published on 2026-11-19 as a GitHub tag/release
+(`v1.2.1`, commit `f660acf`). The npm registry still serves 1.2.0 — install the
+git spec pinned to that commit as documented in README → Install; the npm
+`dsh-mcp-progressive@1.2.1` install path will be added once it is published
+there.
+
 Security:
 
 - `/dsh-mcp-hub/*` management routes now ask the Host `connection` service for

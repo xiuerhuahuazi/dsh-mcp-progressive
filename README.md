@@ -160,16 +160,27 @@ Requires DeepSeek Harness `>=0.2.2-rc.1 <0.3.0-0` (0.2.2 moved tool declarations
 declares one runtime dependency, `yaml` (`^2.9.1`), used for the patch rewrite; the bundle
 installation installs it.
 
+**1.2.1 lives on GitHub, not on npm yet.** The npm registry still serves only
+`dsh-mcp-progressive@1.2.0`, which predates these fixes, so installing
+`dsh-mcp-progressive@1.2.1` from npm fails until that release is published there. Install from
+the GitHub release, pinned to a commit (the DSH docs recommend a pinned digest over a moving
+branch):
+
 ```
-plugin_manager → action: "install_bundle", target: "dsh-mcp-progressive@1.2.1"
+plugin_manager → action: "install_bundle", target: "github:xiuerhuahuazi/dsh-mcp-progressive#f660acf7dbcd8ab38f7d22bed1bdbf9224da4b65"
 ```
 
-or **Settings → Plugins → install bundle** with `dsh-mcp-progressive@1.2.1`. The bundle inserts
+or **Settings → Plugins → install bundle** with the same spec. The tag `#v1.2.1` points at the
+same commit and is also accepted, but a pinned commit is the safer choice. The bundle inserts
 the row `mcp-progressive`; no other bundle is required.
 
-Upgrading from 1.2.0 (or 1.0.0): rebuild/reinstall the bundle, restart the Harness app once so
-the client half and package metadata are picked up, then refresh the page. A fresh install shows
-the **MCP servers** tab on first start.
+Upgrading from the npm `dsh-mcp-progressive@1.2.0` (or 1.0.0): remove the old installed
+package/bundle first, then install the git spec above; restart the Harness app once so the
+client half and package metadata are picked up, then refresh the page. A fresh install shows the
+**MCP servers** tab on first start.
+
+Once 1.2.1 is published to npm, plain `dsh-mcp-progressive@1.2.1` will work too; this section
+will say so at that point.
 
 ### Configuration
 
@@ -453,15 +464,23 @@ manager 的诊断而不是盲写补丁；restart 的启动步骤失败时会报�
 `system-prompt/assemble` 瀑布，这正是旧版本无法运行本版本的原因）。插件声明唯一的运行时依赖
 `yaml`（`^2.9.1`），用于补丁改写；安装 bundle 时会一并安装。
 
+**1.2.1 目前只在 GitHub 上，还没发布到 npm。** npm registry 上仍然只有
+`dsh-mcp-progressive@1.2.0`（旧版本，不含本次修复），所以用 npm spec
+`dsh-mcp-progressive@1.2.1` 会失败，直到该版本正式发布到 npm。请从 GitHub release 安装，并钉住
+commit（DSH 文档建议钉 sha，而不是跟随会移动的分支）：
+
 ```
-plugin_manager → action: "install_bundle", target: "dsh-mcp-progressive@1.2.1"
+plugin_manager → action: "install_bundle", target: "github:xiuerhuahuazi/dsh-mcp-progressive#f660acf7dbcd8ab38f7d22bed1bdbf9224da4b65"
 ```
 
-或在**设置 → 插件 → 安装 bundle** 中填入 `dsh-mcp-progressive@1.2.1`。该 bundle 会插入
-`mcp-progressive` 行，不依赖其他 bundle。
+或在**设置 → 插件 → 安装 bundle** 中填入同一个 spec。tag `#v1.2.1` 指向同一个 commit，也可用，
+但钉 commit 更稳。该 bundle 会插入 `mcp-progressive` 行，不依赖其他 bundle。
 
-从 1.2.0（或 1.0.0）升级：重装/重建 bundle，**重启一次 Harness 应用**让客户端半侧与包元数据
-生效，然后刷新页面；全新安装首次启动即可看到「MCP 服务器」标签页。
+从 npm 的 `dsh-mcp-progressive@1.2.0`（或 1.0.0）升级：先移除旧的已安装包/bundle，再安装上面的
+git spec；**重启一次 Harness 应用**让客户端半侧与包元数据生效，然后刷新页面；全新安装首次启动即可
+看到「MCP 服务器」标签页。
+
+等 1.2.1 发布到 npm 之后，直接 `dsh-mcp-progressive@1.2.1` 也会可用；届时本节会更新。
 
 ### 配置
 
