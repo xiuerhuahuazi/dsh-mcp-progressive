@@ -115,13 +115,34 @@ test('POST routes refuse a declared non-JSON content type', async (t) => {
   const withCharset = await post(env, TOGGLE, { entryId: 'include:demo', enabled: false }, { 'content-type': 'Application/JSON; charset=utf-8' })
   assert.equal(withCharset.status, 200, 'the media type is matched case-insensitively and ignores parameters')
   assert.equal(env.row.enabled, false)
+})
 
-  // A caller that declares no type at all is the in-process panel's historical
-  // shape; the Connection fence is the real gate there. Keep that path working
-  // because the frozen smoke suite drives it that way.
-  const noType = await request(env, TOGGLE, { method: 'POST', body: { entryId: 'include:demo', enabled: true }, headers: {} })
-  assert.equal(noType.status, 200)
+test('a POST with a JSON body but no content-type header is a 415 with zero manager calls', async (t) => {
+  const env = await createManagementEnv()
+  t.after(() => env.dispose())
+
+  // The shared request() now adds the JSON media type for any body. Setting the
+  // header key to undefined models a client that sends the body without it: the
+  // handler reads `req.headers['content-type']` as undefined, exactly the
+  // header-less case.
+  const noHeader = await request(env, TOGGLE, {
+    method: 'POST',
+    body: { entryId: 'include:demo', enabled: false },
+    headers: { 'content-type': undefined },
+  })
+  assert.equal(noHeader.status, 415)
+  assert.equal(noHeader.body.ok, false)
+  assert.match(noHeader.body.error, /content-type must be application\/json/)
+  assert.equal(env.calls.length, 0, 'a header-less request must not reach the manager')
   assert.equal(env.row.enabled, true)
+
+  const emptyHeader = await request(env, TOGGLE, {
+    method: 'POST',
+    body: { entryId: 'include:demo', enabled: false },
+    headers: { 'content-type': '' },
+  })
+  assert.equal(emptyHeader.status, 415)
+  assert.equal(env.calls.length, 0)
 })
 
 test('methods are enforced with an allow header', async (t) => {

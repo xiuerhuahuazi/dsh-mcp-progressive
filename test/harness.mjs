@@ -623,6 +623,10 @@ export async function request(env, routePath, options = {}) {
   if (handler === undefined) throw new Error(`route not registered: ${routePath}`)
   const method = options.method ?? 'GET'
   const headers = { host: '127.0.0.1:53809', ...(options.headers ?? {}) }
+  // A JSON body carries the JSON media type. Callers that exercise a missing or
+  // different content type pass their own header explicitly.
+  const declaresContentType = Object.keys(headers).some((name) => name.toLowerCase() === 'content-type')
+  if (options.body !== undefined && !declaresContentType) headers['content-type'] = 'application/json'
   const req = new EventEmitter()
   Object.assign(req, {
     headers,
