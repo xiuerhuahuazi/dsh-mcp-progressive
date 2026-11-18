@@ -99,6 +99,40 @@ test('a connection fence that throws fails closed', async (t) => {
   assert.equal(env.calls.length, 0)
 })
 
+test('all three routes fail closed with 503 when the connection service is absent', async (t) => {
+  const env = await createManagementEnv()
+  t.after(() => env.dispose())
+  const patchBefore = fs.readFileSync(env.patchPath, 'utf8')
+  const rowBefore = env.row.enabled
+
+  // An HMR recomposition can leave the routes registered while the service is
+  // momentarily absent; a missing fence must never mean "trusted".
+  env.services.delete('connection')
+
+  const responses = [
+    await request(env, STATE),
+    await post(env, TOGGLE, { entryId: 'include:demo', enabled: false }),
+    await post(env, RESTART, { entryId: 'include:demo' }),
+  ]
+  for (const response of responses) {
+    assert.equal(response.status, 503)
+    assert.deepEqual(response.body, {
+      ok: false,
+      error: 'management routes require the Host connection service',
+    })
+  }
+  assert.equal(env.calls.length, 0, 'no manager call may happen without admission')
+  assert.equal(env.row.enabled, rowBefore, 'no state may change without admission')
+  assert.equal(fs.readFileSync(env.patchPath, 'utf8'), patchBefore, 'no patch write may happen without admission')
+
+  // A service that exists but cannot answer admission is the same failure.
+  env.services.set('connection', {})
+  const noFence = await request(env, STATE)
+  assert.equal(noFence.status, 503)
+  assert.deepEqual(noFence.body, { ok: false, error: 'management routes require the Host connection service' })
+  assert.equal(env.calls.length, 0)
+})
+
 test('POST routes refuse a declared non-JSON content type', async (t) => {
   const env = await createManagementEnv()
   t.after(() => env.dispose())
