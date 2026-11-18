@@ -261,18 +261,49 @@ export const DEFAULT_CATALOG = [
 ]
 
 /**
+ * Let a caller replace a service the harness already provided.
+ *
+ * Cordis refuses to register the same service twice, so a test that wants its
+ * own implementation of a harness-provided service would fail on the second
+ * `reflect.provide`. The harness swaps the implementation in place instead:
+ * the service identity — and every fiber that already holds it — stays
+ * stable, which is what a Host that provided the service once looks like.
+ *
+ * @param {object} root the root context
+ * @param {string} name the service name that may be re-provided
+ */
+function allowReprovide(root, name) {
+  const reflect = root.reflect
+  const provide = reflect.provide.bind(reflect)
+  let registered = false
+  reflect.provide = (serviceName, value, check) => {
+    if (serviceName === name && registered) {
+      const current = reflect.get(name, false)
+      if (current !== undefined && current !== null && typeof current === 'object' && value !== null && typeof value === 'object') {
+        Object.assign(current, value)
+        return () => {}
+      }
+    }
+    const disposer = provide(serviceName, value, check)
+    if (serviceName === name) registered = true
+    return disposer
+  }
+}
+
+/**
  * Boot the real plugin against the real DSH runtime.
  *
  * The plugin is applied on the root context (the same seam the review probes
  * used); every agent then owns a scoped child context on which the plugin
  * installs its disclosure restriction. The management half is activated too:
- * the four services it injects are provided as fakes so `mcp_servers`,
+ * the services it injects are provided as fakes so `mcp_servers`,
  * `mcp_server` and the three HTTP routes exist.
  *
  * @param {object} [options]
  * @param {object} [options.config] plugin configuration
  * @param {string[]} [options.catalog] fake MCP tool names
  * @param {object} [options.manager] fake pluginManager implementation
+ * @param {boolean} [options.connection] provide the Host `connection` service (default `true`)
  * @returns {Promise<object>} the mounted environment
  */
 export async function mountPlugin(options = {}) {
@@ -307,6 +338,12 @@ export async function mountPlugin(options = {}) {
     () => true,
   )
   root.reflect.provide('loader', { entries: () => [] }, () => true)
+  if (options.connection !== false) {
+    // The management half injects the Host `connection` service; a desktop
+    // host always has it, so the fixture provides one that admits everything.
+    allowReprovide(root, 'connection')
+    root.reflect.provide('connection', { requestRejection: () => undefined }, () => true)
+  }
 
   const catalog = options.catalog ?? DEFAULT_CATALOG
   for (const name of catalog) registerTool(root, name)

@@ -58,7 +58,13 @@ extraction and the 1.2.1 fixes:
    from the unpacked DSH runtime. `DSH_RUNTIME` overrides the location
    (default `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`); `hasRuntime()`
    reports whether it is there and `runtimeImport(pkg)` performs the absolute
-   import *after* that check.
+   import *after* that check. `mountPlugin()` models a desktop host: it
+   provides `agents`, `pluginManager`, `profileContext`, `webServer`,
+   `loader` and the Host `connection` service, so the plugin's management
+   inject gate opens and `mcp_servers` / `mcp_server` and the three
+   `/dsh-mcp-hub/*` routes exist. Pass `mountPlugin({ connection: false })` to
+   model a host without Connection — the management half then stays inactive,
+   exactly as it does in production.
 2. **Fake plugin context** — a plain object speaking the Cordis surface the
    plugin uses (`on` / `effect` / `get` / `inject` / `tools` / `logger` /
    `webServer` / `pluginManager` / `profileContext` / `loader` /
@@ -74,6 +80,13 @@ Helpers: `makeRoot()`, `makeAgent()`, `registerTool()`, `visibleNames()`,
 `promptTools()`, `mountPlugin()`, `callTool()`, `createManagementEnv()`,
 `request()`, `mountClientPanel()`, `findNode()`, `makeTempDir()`,
 `withTempDir()`, `withVirtualClock()` and `flushMicrotasks()`.
+
+One harness-only convenience: Cordis refuses to register the same service
+twice, so a test that wants its own `connection` implementation on a
+`mountPlugin()` root would fail on the second `reflect.provide`. The harness
+swaps that one service **in place** — the service identity and every fiber
+that already holds it stay stable, and the caller's implementation takes over
+(the management routes keep working and see the new `requestRejection`).
 
 ## What is intentionally skipped in CI
 
