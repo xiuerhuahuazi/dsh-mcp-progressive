@@ -116,9 +116,9 @@ contract behind a stub fence, not the platform wiring.
   `ctx.tools.execute` exactly once and returns its output;
 * **with the real DSH runtime**: `mcp_call` leaves a real `dsh-session` history with no
   orphan tool result — it writes no nested `tool/call`/`tool/result` events (an unpaired
-  `tool/result` would make the next provider request fail), and the target/target-argument
-  audit line is always in the result instead. A second case keeps the empty-output
-  fallback sentence next to that audit line.
+  `tool/result` would make the next provider request fail), and the target/argument audit line
+  is in every returned result instead (a rare internal pipeline failure still throws). A second
+  case keeps the empty-output fallback sentence next to that audit line.
 
 ## The three worlds in `test/harness.mjs`
 

@@ -71,10 +71,10 @@ agent's registry view:
    from the result. It writes **no** session events for the nested call: a synthetic
    `tool/result` for a call no assistant message declares would leave an orphan tool message in
    `session.deriveMessages()` and the next provider request would be rejected. The audit trail is
-   always an in-result line — `(audit: dispatched <tool>; argument keys: …)` — and the
-   empty-output fallback keeps `(<tool> completed with no output.)` next to it. Its transient
-   scope registration is removed afterwards, and an `alwaysVisible` target needs no
-   registration at all.
+   an in-result line on every **returned** result — `(audit: dispatched <tool>; argument keys: …)`
+   — (a rare internal pipeline failure still throws), and the empty-output fallback keeps
+   `(<tool> completed with no output.)` next to it. Its transient scope registration is removed
+   afterwards, and an `alwaysVisible` target needs no registration at all.
 9. One short prompt section advertises the catalog without listing any schema — up to four
    servers with counts and a pointer to `mcp_search`, roughly:
    `MCP catalog: rea (170 tools), bilibili (31), blender (9); not loaded by default — mcp_search to find one.`
@@ -381,9 +381,9 @@ MCP 工具的渐进披露：模型不必在每次请求里为每个 `mcp__*` 工
    它返回 MCP 服务器自己的错误文本而不是裸的抛出消息，转发 deferred context 与结束回合信号，并从
    结果里识别 PTC 拒绝。它为嵌套调用**不写任何 session 事件**：为一条没有任何 assistant 消息声明
    的调用追加 `tool/result`，会在 `session.deriveMessages()` 里留下孤立的工具结果，下一次模型请求
-   会被拒绝。审计线索始终是结果里的一行——`(audit: dispatched <tool>; argument keys: …)`——空输出
-   回退还把 `(<tool> completed with no output.)` 保留在它旁边。临时 scope 注册随后移除；
-   `alwaysVisible` 目标则完全不需要注册。
+   会被拒绝。审计线索在每一个**返回的**结果里都是一行——`(audit: dispatched <tool>; argument keys:
+   …)`——（极少数内部管线失败仍会抛出），空输出回退还把 `(<tool> completed with no output.)`
+   保留在它旁边。临时 scope 注册随后移除；`alwaysVisible` 目标则完全不需要注册。
 9. 一段很短的 system-prompt 章节提示目录存在，但不列出任何 schema——最多四个服务器及计数，并指向
    `mcp_search`，大致是：
    `MCP catalog: rea (170 tools), bilibili (31), blender (9); not loaded by default — mcp_search to find one.`

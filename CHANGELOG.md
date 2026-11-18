@@ -84,10 +84,10 @@ Fixed:
   the earlier synthetic `tool/call` + `tool/result` pair left an orphan tool
   message in a real session history (no assistant message declares the call) and
   made the next DeepSeek request fail with `INVALID_REQUEST` ("tool result has
-  no matching call"). The audit trail is now always an in-result line
-  (`(audit: dispatched <tool>; argument keys: …)`), kept next to the
-  empty-output fallback sentence, and an `alwaysVisible` target needs no
-  transient shadow.
+  no matching call"). The audit trail is now an in-result line on every
+  returned result (`(audit: dispatched <tool>; argument keys: …)`) — a rare
+  internal pipeline failure still throws — kept next to the empty-output
+  fallback sentence, and an `alwaysVisible` target needs no transient shadow.
 - Corrective unknown-tool text distinguishes "registered but not loaded in this
   conversation" from "not in this MCP catalog right now".
 - The corrective `tools/pre-execute` handler (not `mcp_load`) refuses a call to
