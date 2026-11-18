@@ -5,8 +5,9 @@
  * runtime or network is involved. The catalog fixture mirrors the real shape
  * (rea 170 + bilibili 31 + blender 9 = 210 tools, mixed English/Chinese
  * descriptions) so the review's measured queries can be asserted one by one.
- * The real 210-tool catalog from the review probes is used when present for
- * the schema-fitting cases; otherwise those cases skip.
+ * The real 210-tool catalog from the private review probes is optional: set
+ * `MCP_REVIEW_CATALOG` to a local copy to run the real-catalog cases, otherwise
+ * they skip (CI has no such file, and no home-directory path is committed).
  */
 
 import assert from 'node:assert/strict'
@@ -118,10 +119,15 @@ function buildCatalog() {
 
 const CATALOG = buildCatalog()
 
-/** The real catalog the review probes captured; used only when it exists. */
+/**
+ * Optional real 210-tool catalog from the private review probes. The real
+ * catalog is ~745 KB of private setup data, so it is not committed; point
+ * `MCP_REVIEW_CATALOG` at a local copy to exercise the real-catalog cases.
+ */
 const REVIEW_CATALOG =
-  process.env.MCP_REVIEW_CATALOG ??
-  '/Users/fucheng/Documents/project/dsh-mcp-progressive-review/2026-11-19/probe/deepseek/catalog.json'
+  typeof process.env.MCP_REVIEW_CATALOG === 'string' && process.env.MCP_REVIEW_CATALOG.trim() !== ''
+    ? process.env.MCP_REVIEW_CATALOG.trim()
+    : undefined
 
 const namesOf = (result) => result.entries.map((item) => item.name)
 
@@ -608,7 +614,8 @@ test('a single match gets the whole page budget for its schema', () => {
 // The real 210-tool catalog from the review probes (skips when absent).
 // ---------------------------------------------------------------------------
 
-const hasReviewCatalog = fs.existsSync(REVIEW_CATALOG)
+const hasReviewCatalog = REVIEW_CATALOG !== undefined && fs.existsSync(REVIEW_CATALOG)
+const NO_REVIEW_CATALOG = 'set MCP_REVIEW_CATALOG to a local copy of the review catalog to run this case'
 const readReviewCatalog = () => JSON.parse(fs.readFileSync(REVIEW_CATALOG, 'utf8')).tools
 const toEntry = (schema) => {
   const { server, tool } = parseName(schema.name)
@@ -624,7 +631,7 @@ const toEntry = (schema) => {
 
 test('real catalog: measured queries all recall (S9)', (t) => {
   if (!hasReviewCatalog) {
-    t.skip(`review catalog not found at ${REVIEW_CATALOG}`)
+    t.skip(NO_REVIEW_CATALOG)
     return
   }
   const catalog = readReviewCatalog().map(toEntry)
@@ -663,7 +670,7 @@ test('real catalog: measured queries all recall (S9)', (t) => {
 
 test('real catalog: the 57,175-char compare_web_captures schema always parses (S10)', (t) => {
   if (!hasReviewCatalog) {
-    t.skip(`review catalog not found at ${REVIEW_CATALOG}`)
+    t.skip(NO_REVIEW_CATALOG)
     return
   }
   const catalog = readReviewCatalog().map(toEntry)
@@ -682,7 +689,7 @@ test('real catalog: the 57,175-char compare_web_captures schema always parses (S
 
 test('real catalog: every schema either parses within budget or is explicitly omitted (S10)', (t) => {
   if (!hasReviewCatalog) {
-    t.skip(`review catalog not found at ${REVIEW_CATALOG}`)
+    t.skip(NO_REVIEW_CATALOG)
     return
   }
   const catalog = readReviewCatalog().map(toEntry)
