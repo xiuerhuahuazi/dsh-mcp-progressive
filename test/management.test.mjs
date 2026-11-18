@@ -1507,3 +1507,63 @@ test('reading live status never reaches a write path', async (t) => {
   assert.equal(env.row.enabled, true)
   assert.equal(fs.readFileSync(env.patchPath, 'utf8'), patchBefore, 'no patch write may follow a read')
 })
+
+test('F3: a failed fiber outranks a stale live cell', async (t) => {
+  // The 1.3 review repro: a colliding re-apply disposes the old supervisor
+  // before the new apply throws, so the surviving cell says "closed" while the
+  // fiber is failed. The failed fiber (and its diagnostic) must own the row.
+  const diagnostic = 'mcp-client: serverName "demo" is already in use by another mcp-client instance'
+  const rows = [row({ entryId: 'include:demo', fiberPhase: 'failed', diagnostic })]
+  const entries = [liveEntry('include:demo', { state: 'closed' }).entry]
+  const env = await createManagementEnv({ rows, entries })
+  t.after(() => env.dispose())
+
+  // The pure helpers agree before the route is involved.
+  for (const stale of [{ state: 'closed' }, { state: 'waiting-credentials', lastError: 'missing token' }, { state: 'connected', toolCount: 2 }]) {
+    assert.equal(liveStatusView({ enabled: true, fiberPhase: 'failed', live: stale }), null)
+    assert.equal(serverStatus({ enabled: true, fiberPhase: 'failed', toolCount: 0, live: stale }), 'error')
+  }
+
+  const response = await request(env, STATE)
+  assert.equal(response.status, 200)
+  const server = response.body.servers[0]
+  assert.equal(server.status, 'error', 'the failed fiber is reported as an error, not as "starting"')
+  assert.equal(server.statusDetail, null, 'a stale cell supplies no detail for a failed fiber')
+  assert.deepEqual(server.live, { state: 'closed' }, 'the cell is still reported as data, without overriding')
+  assert.equal(server.diagnostic, diagnostic)
+
+  const list = env.ctx.tools.definitions().find((candidate) => candidate.name === 'mcp_servers')
+  const text = await list.execute({})
+  assert.match(text, /: error,/)
+  assert.match(text, /; diagnostic: mcp-client: serverName "demo" is already in use/)
+  assert.ok(!text.includes('— closed'), 'the stale "closed" detail must not reach the model')
+})
+
+test('F5: a hand-built non-string lastError cannot make the detail throw', () => {
+  const hostile = {
+    toString() {
+      throw new Error('boom')
+    },
+  }
+  const view = (live) => liveStatusView({ enabled: true, live })
+
+  // Nothing here may throw, and every detail stays one bounded line.
+  for (const lastError of [{ code: 'X' }, 42, true, 10n, hostile, null, undefined, ['a', 'b']]) {
+    assert.doesNotThrow(() => view({ state: 'failed', reason: 'gave-up', lastError }))
+    const failed = view({ state: 'failed', reason: 'gave-up', lastError })
+    assert.equal(failed.status, 'error')
+    assert.equal(typeof failed.detail, 'string')
+    assert.ok(failed.detail.length <= 180, `bounded detail for ${String(typeof lastError)} (length ${failed.detail.length})`)
+    assert.ok(!failed.detail.includes('\n'))
+    assert.doesNotThrow(() => view({ state: 'reconnecting', attempt: 1, maxAttempts: 2, lastError }))
+  }
+
+  // Primitives stay readable; objects are dropped instead of coerced.
+  assert.equal(view({ state: 'failed', reason: 'gave-up', lastError: 42 }).detail, 'failed: gave-up · 42')
+  assert.equal(view({ state: 'failed', reason: 'gave-up', lastError: hostile }).detail, 'failed: gave-up')
+  assert.equal(view({ state: 'failed', reason: 'gave-up', lastError: { code: 'X' } }).detail, 'failed: gave-up')
+  assert.equal(
+    view({ state: 'reconnecting', attempt: 1, maxAttempts: 2, lastError: { code: 'X' } }).detail,
+    'reconnecting (attempt 1/2)',
+  )
+})
