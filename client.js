@@ -343,18 +343,26 @@ window.__ModuleLoader__.load({
       return fillTemplate(t('retryIn'), { seconds })
     }
 
+    /** Whether a row's own status still lets its `live` cell explain itself. */
+    function liveDetailAllowed(status) {
+      return status === 'starting' || status === 'error' || status === 'running' || status === 'idle'
+    }
+
     /**
      * One-line explanation for the card's second line.
      *
-     * The Host's `statusDetail` is authoritative. When it is absent (older
-     * Host, or the read failed) a line is rebuilt from `live` — the failure
-     * reason, the next retry, and the last error — so the card still explains
-     * an `error` row instead of leaving it bare. `null` means "no detail".
+     * The Host's `statusDetail` is authoritative and renders as sent. When it
+     * is absent (older Host, or the read failed) a line is rebuilt from `live`
+     * — the failure reason, the next retry, and the last error — but only while
+     * the row's own status still describes a live or failing connection. A
+     * stopped/stopping row may still carry its last cell (`presentServer`
+     * forwards `live` unchanged) and must not contradict the reported status
+     * with a stale failure. `null` means "no detail".
      */
-    function detailOf(server, live, now, t) {
+    function detailOf(server, live, status, now, t) {
       const detail = typeof server.statusDetail === 'string' ? server.statusDetail.trim() : ''
       if (detail !== '') return detail
-      if (live === null) return null
+      if (live === null || !liveDetailAllowed(status)) return null
       const parts = []
       if (live.state === 'failed') {
         const reason = typeof live.reason === 'string' && live.reason !== '' ? live.reason : ''
@@ -476,7 +484,8 @@ window.__ModuleLoader__.load({
           const pendingAction = pending.get(key)
           const busy = pendingAction !== undefined
           const live = liveOf(server)
-          const stateKey = busy ? BUSY_STATE[pendingAction] : String(server.status || 'unknown')
+          const statusKey = String(server.status || 'unknown')
+          const stateKey = busy ? BUSY_STATE[pendingAction] : statusKey
           // The Host maps connecting/reconnecting/waiting-credentials to
           // `starting`; an in-flight action keeps its own verb ("Starting…"),
           // otherwise the live state says which kind of start this is.
@@ -493,7 +502,7 @@ window.__ModuleLoader__.load({
           // The Host's one-line live explanation (reason, retry countdown, last
           // error). Shown as a second clamped line; the full text stays in the
           // title, so nothing is lost to the ellipsis.
-          const detail = detailOf(server, live, now, t)
+          const detail = detailOf(server, live, statusKey, now, t)
           const tagHint = detail === null ? diagnostic : detail
           const tagTitle = tagHint === null
             ? fillTemplate(t('tagTitlePlain'), { label })

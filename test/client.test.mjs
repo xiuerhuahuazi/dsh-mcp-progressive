@@ -606,3 +606,57 @@ test('a detail that disappears between polls is removed cleanly', async () => {
     mounted.panel.unmount()
   }
 })
+
+test('a stopped or stopping row does not inherit a stale live failure detail', async () => {
+  const rows = [
+    serverRow({
+      entryId: 'include:off',
+      id: 'off',
+      serverName: 'off',
+      enabled: false,
+      status: 'stopped',
+      statusDetail: null,
+      live: { state: 'failed', reason: 'gave-up', lastError: 'stale X' },
+    }),
+    serverRow({
+      entryId: 'include:bye',
+      id: 'bye',
+      serverName: 'bye',
+      enabled: false,
+      status: 'stopping',
+      statusDetail: null,
+      live: { state: 'failed', reason: 'gave-up', lastError: 'stale X' },
+    }),
+  ]
+  const mounted = mountPanel({ fetch: async () => response(stateBody(rows)) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const tags = allByClass(tree, 'dsh-mcp-tag')
+    assert.deepEqual(tags.map(textOf), ['stopped', 'stopping'])
+    assert.equal(detailLine(tree), undefined, 'a stopped row must not borrow its last live cell')
+    assert.doesNotMatch(textOf(tree), /failed|stale X/)
+    assert.deepEqual(tags.map((tag) => tag.props.title), ['status: stopped', 'status: stopping'])
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a stopped row still shows the statusDetail the Host sent', async () => {
+  const statusDetail = 'stopped by the user · saved to the profile patch'
+  const row = serverRow({ enabled: false, status: 'stopped', statusDetail, live: { state: 'failed', lastError: 'stale X' } })
+  const mounted = mountPanel({ fetch: async () => response(stateBody([row])) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const tag = byClass(tree, 'dsh-mcp-tag')
+    assert.equal(textOf(tag), 'stopped')
+    const detail = detailLine(tree)
+    assert.ok(detail !== undefined, "the Host's own detail is always shown")
+    assert.equal(textOf(detail), statusDetail)
+    assert.equal(String(tag.props.title), 'status: stopped — ' + statusDetail)
+    assert.doesNotMatch(textOf(tree), /stale X/)
+  } finally {
+    mounted.panel.unmount()
+  }
+})
