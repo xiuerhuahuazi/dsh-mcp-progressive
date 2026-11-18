@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  MANAGEMENT_ROUTES,
   PLUGIN_ENTRY,
   callTool,
   createFakeContext,
@@ -559,6 +560,9 @@ runtimeTest('P2-16: mcp_call does not shadow an alwaysVisible target', async () 
 
 runtimeTest('P1-7: mcp_server writes ask for approval while mcp_servers stays ungated', async () => {
   const mounted = await mountPlugin()
+  // Management activates only after the Host connection service appears, so
+  // provide it first: the gate is exercised on the real mcp_server tool.
+  mounted.root.reflect.provide('connection', { requestRejection: () => undefined }, () => true)
   const requests = []
   mounted.root.reflect.provide(
     'approval',
@@ -569,6 +573,11 @@ runtimeTest('P1-7: mcp_server writes ask for approval while mcp_servers stays un
       },
     },
     () => true,
+  )
+  await flushMicrotasks()
+  assert.ok(
+    mounted.root.tools.definitions().some((definition) => definition.name === 'mcp_server'),
+    'mcp_server is registered once Connection exists',
   )
   const agent = await mounted.createAgent('approval-agent')
 
@@ -582,11 +591,68 @@ runtimeTest('P1-7: mcp_server writes ask for approval while mcp_servers stays un
   assert.equal(requests.length, 1, 'the read tool is not gated')
 
   const rejected = await mountPlugin()
+  rejected.root.reflect.provide('connection', { requestRejection: () => undefined }, () => true)
   rejected.root.reflect.provide('approval', { async request() { return 'rejected' } }, () => true)
+  await flushMicrotasks()
   const rejectedAgent = await rejected.createAgent('rejected-agent')
   const { result } = await callTool(rejected.root, rejectedAgent, 'mcp_server', { server: 'rea', action: 'stop' })
   assert.equal(result?.isError, true, 'a rejection stops the write')
   assert.match(resultText(result), /rejected tool "mcp_server"/, 'the pipeline denial is surfaced')
+})
+
+// ---------------------------------------------------------------------------
+// Management admission — Connection is required, the routes must not fail open.
+// ---------------------------------------------------------------------------
+
+test('management admission requires the Host connection service', async () => {
+  const managementNames = ['mcp_server', 'mcp_servers']
+
+  // The fake context runs an `inject()` callback only when every requested
+  // service exists, exactly like Cordis, so dropping `connection` from the
+  // inject list shows up as "the management half never activates".
+  const createEnv = (withConnection) => {
+    const routes = []
+    const services = {
+      pluginManager: {
+        async listPlugins() {
+          return []
+        },
+        async setPluginEnabled() {
+          return { application: 'applied' }
+        },
+      },
+      profileContext: { home: null, patchPath: null },
+      webServer: {
+        register(route) {
+          routes.push(route.path)
+          return () => {}
+        },
+      },
+      loader: { entries: () => [] },
+    }
+    if (withConnection) services.connection = { requestRejection: () => undefined }
+    const fake = createFakeContext({ tools: createFakeToolsService(), services })
+    plugin.apply(fake.ctx, {})
+    return { fake, routes }
+  }
+
+  const without = createEnv(false)
+  const withoutNames = without.fake.ctx.tools.definitions().map((definition) => definition.name)
+  for (const name of managementNames) {
+    assert.equal(withoutNames.includes(name), false, `${name} must not register without Connection`)
+  }
+  assert.deepEqual(without.routes, [], 'no /dsh-mcp-hub route is registered without Connection')
+
+  const withConnection = createEnv(true)
+  const withNames = withConnection.fake.ctx.tools.definitions().map((definition) => definition.name)
+  for (const name of managementNames) {
+    assert.equal(withNames.includes(name), true, `${name} registers once Connection exists`)
+  }
+  assert.deepEqual(
+    [...withConnection.routes].sort(),
+    [...MANAGEMENT_ROUTES].sort(),
+    'all three management routes register once Connection exists',
+  )
 })
 
 // ---------------------------------------------------------------------------
