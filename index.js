@@ -38,7 +38,19 @@
  */
 
 import { messageOf } from './lib/util.js'
-import { oneLine, compileAllowlist, signatureOf, typeLabel, fitSchema, MAX_DETAIL_CHARS } from './lib/search.js'
+import {
+  oneLine,
+  compileAllowlist,
+  signatureOf,
+  typeLabel,
+  fitSchema,
+  parseName,
+  rankCatalog,
+  renderSearch,
+  countHidden,
+  MCP_SEARCH_DESCRIPTION,
+  MAX_SEARCH_LIMIT,
+} from './lib/search.js'
 import { setPatchDisabled, patchDeclares, yamlScalar } from './lib/patch.js'
 import {
   registerServerManagement,
@@ -58,12 +70,6 @@ export const inject = ['tools']
 
 /** Meta-tool names; never hidden, never loadable. */
 const META_TOOLS = new Set(['mcp_search', 'mcp_load', 'mcp_call'])
-
-/** Hard cap for one search page, independent of configuration. */
-const MAX_SEARCH_LIMIT = 40
-
-/** Hard cap for full-schema detail pages. */
-const MAX_DETAIL_TOOLS = 2
 
 /**
  * Configuration defaults. This bundle declares no Config schema because it is
@@ -143,14 +149,6 @@ export function apply(ctx, rawConfig) {
   const isHidden = (toolName, agent) =>
     isCatalogName(toolName) && !allowVisible(toolName) && !loadedSet(agent).has(toolName)
 
-  /** Split `mcp__<server>__<tool>` into its parts. */
-  const parseName = (toolName) => {
-    const rest = toolName.slice(prefix.length)
-    const separator = rest.indexOf('__')
-    if (separator <= 0) return { server: rest, tool: '' }
-    return { server: rest.slice(0, separator), tool: rest.slice(separator + 2) }
-  }
-
   /**
    * The MCP catalog as the unrestricted global registry sees it. It must not be
    * read through the agent scope: the disclosure restriction installed for that
@@ -161,7 +159,7 @@ export function apply(ctx, rawConfig) {
       .schemas()
       .filter((schema) => isCatalogName(schema.name))
       .map((schema) => {
-        const { server, tool } = parseName(schema.name)
+        const { server, tool } = parseName(schema.name, prefix)
         return {
           name: schema.name,
           server,
@@ -171,108 +169,6 @@ export function apply(ctx, rawConfig) {
           signature: signatureOf(schema.parameters),
         }
       })
-
-  /** Score one catalog entry against lowercased query tokens. */
-  const scoreEntry = (entry, tokens, query) => {
-    if (tokens.length === 0) return 0
-    const name = entry.name.toLowerCase()
-    const short = entry.tool.toLowerCase()
-    const description = String(entry.description).toLowerCase()
-    let score = 0
-    if (query.length > 0 && name === query) score += 1000
-    if (query.length > 0 && short === query) score += 900
-    for (const token of tokens) {
-      let hit = 0
-      if (short === token) hit = 60
-      else if (short.startsWith(token)) hit = 40
-      else if (short.includes(token)) hit = 30
-      else if (name.includes(token)) hit = 20
-      else if (entry.server.toLowerCase().includes(token)) hit = 12
-      else if (description.includes(token)) hit = 8
-      if (hit === 0) return 0
-      score += hit
-    }
-    return score
-  }
-
-  /** Rank the catalog for one query. */
-  const searchCatalog = (query, server, limit) => {
-    const tokens = query.toLowerCase().split(/\s+/).filter(Boolean)
-    const entries = catalogOf().filter((entry) => server === undefined || entry.server === server)
-    const ranked = []
-    for (const entry of entries) {
-      const score = scoreEntry(entry, tokens, query.toLowerCase())
-      if (tokens.length > 0 && score === 0) continue
-      ranked.push({ entry, score })
-    }
-    ranked.sort((left, right) => right.score - left.score || left.entry.name.localeCompare(right.entry.name))
-    return {
-      entries: ranked.slice(0, limit).map((item) => item.entry),
-      matched: ranked.length,
-      servers: summarizeServers(entries),
-      available: entries.length,
-    }
-  }
-
-  /** Server names with tool counts, stable order. */
-  const summarizeServers = (entries) => {
-    const counts = new Map()
-    for (const entry of entries) counts.set(entry.server, (counts.get(entry.server) ?? 0) + 1)
-    return [...counts.entries()].sort((left, right) => left[0].localeCompare(right[0]))
-  }
-
-  /** Render one search result as compact text. */
-  const renderSearch = (result, { query, detail, agent }) => {
-    const lines = []
-    if (result.servers.length === 0) {
-      return (
-        'No MCP tools are registered right now. Check that the MCP server rows are connected and enabled; ' +
-        'when a server reconnects its tools become searchable again.'
-      )
-    }
-    lines.push(`MCP servers: ${result.servers.map(([server, count]) => `${server} (${count} tools)`).join(', ')}`)
-    const hiddenCount = deniedNames(agent).length
-    if (hiddenCount > 0) lines.push(`Hidden until loaded: ${hiddenCount} of ${result.available} tools (not in your tool set).`)
-    const emptyQuery = query.trim() === ''
-    if (result.entries.length === 0) {
-      lines.push(`No tool matched "${query}".`)
-    } else if (emptyQuery) {
-      lines.push(`Showing ${result.entries.length} of ${result.available} tools (pass query words or server to narrow):`)
-    } else {
-      lines.push(`Matches ${result.matched} of ${result.available}:`)
-    }
-    if (result.entries.length > 0) {
-      for (const entry of result.entries) {
-        const signature = entry.signature ? `(${entry.signature})` : '()'
-        const summary = oneLine(entry.description, summaryChars)
-        const marker = loadedSet(agent).has(entry.name) ? ' [loaded]' : ''
-        lines.push(`- ${entry.name}${signature}${marker}${summary ? ` — ${summary}` : ''}`)
-      }
-      if (!emptyQuery && result.matched > result.entries.length) {
-        lines.push(`(${result.matched - result.entries.length} more not shown; narrow the query or raise limit up to ${MAX_SEARCH_LIMIT}.)`)
-      }
-      if (detail === 'full') {
-        const detailed = result.entries.slice(0, MAX_DETAIL_TOOLS)
-        for (const entry of detailed) {
-          const fitted = fitSchema(entry.parameters, MAX_DETAIL_CHARS)
-          lines.push(`schema for ${entry.name}${fitted.truncated ? ' (annotations trimmed to fit)' : ''}:`)
-          lines.push(fitted.text)
-        }
-        if (result.entries.length > detailed.length) {
-          lines.push(`(full schemas shown for the first ${MAX_DETAIL_TOOLS} matches only.)`)
-        }
-      } else if (emptyQuery) {
-        lines.push(
-          `${enableLoad ? 'mcp_load makes tools native; ' : ''}mcp_call runs one directly without loading.`,
-        )
-      } else {
-        lines.push(
-          `detail:"full" shows input schemas. ${enableLoad ? 'mcp_load adds tools as native tools; ' : ''}mcp_call runs one without loading.`,
-        )
-      }
-    }
-    return lines.join('\n')
-  }
 
   // ---------------------------------------------------------------------------
   // Disclosure: keep unloaded catalog schemas out of each agent's tool view.
@@ -542,10 +438,7 @@ export function apply(ctx, rawConfig) {
   ctx.effect(() =>
     ctx.tools.register({
       name: 'mcp_search',
-      description:
-        'Search the MCP tool catalog. MCP tools are not listed in your tool set to save context, so search before using one. ' +
-        'Returns each match\'s full tool name, a one-line summary, and its parameter signature; detail:"full" adds the input schema. ' +
-        'Then call mcp_load to make matches native tools, or mcp_call to run one directly.',
+      description: MCP_SEARCH_DESCRIPTION,
       parameters: {
         type: 'object',
         properties: {
@@ -576,8 +469,17 @@ export function apply(ctx, rawConfig) {
           const requested = Number.isFinite(args?.limit) ? Math.trunc(args.limit) : defaultLimit
           const limit = Math.min(MAX_SEARCH_LIMIT, Math.max(1, requested))
           const detail = args?.detail === 'full' ? 'full' : 'brief'
-          const result = searchCatalog(query, server, limit)
-          return renderSearch(result, { query, detail, agent: exec.agent })
+          const result = rankCatalog(catalogOf(), { query, server, limit })
+          // The hidden count shares the searched scope with its denominator, so a
+          // `server` filter cannot produce "201 of 170".
+          const hiddenCount = countHidden(result.availableNames, deniedNames(exec.agent))
+          return renderSearch(result, {
+            summaryChars,
+            detail,
+            loadedNames: loadedSet(exec.agent),
+            hiddenCount,
+            enableLoad,
+          })
         } catch (error) {
           return `Error: mcp_search failed internally: ${messageOf(error)}`
         }
