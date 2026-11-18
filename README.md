@@ -249,13 +249,13 @@ What follows from the formula:
 
 Everything runs locally with no network and no access to `~/.dsh`:
 
-- `npm test` — the suite in `test/` (`node --test`), **164** tests. With the unpacked DSH
+- `npm test` — the suite in `test/` (`node --test`), **167** tests. With the unpacked DSH
   runtime present (`$DSH_RUNTIME`, default `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`) it
-  is 161 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
-  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 164 pass
+  is 164 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
+  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 167 pass
   / 0 skip; the catalog is private and not committed). On CI (`.github/workflows/test.yml`,
-  Node 22 and 24) neither the runtime nor that catalog exists, so the 17 runtime-dependent and
-  the 3 real-catalog cases skip: 144 pass / 20 skip / 0 fail.
+  Node 22 and 24) neither the runtime nor that catalog exists, so the 18 runtime-dependent and
+  the 3 real-catalog cases skip: 146 pass / 21 skip / 0 fail.
 - `node scripts/repro-review.mjs` — the review-defect **regression gate** (default
   `--expect fixed`). It replays the six defect families from the 2026-11-19 review and exits 0
   only when none of them reproduces; otherwise it prints `REGRESSION: <families>` and exits 1.
@@ -515,12 +515,12 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
 
 全部本地运行，不联网、不读写 `~/.dsh`：
 
-- `npm test`——`test/` 下的测试（`node --test`），共 **164** 个。在 `$DSH_RUNTIME`（默认
-  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 161 通过 / 3 跳过 /
+- `npm test`——`test/` 下的测试（`node --test`），共 **167** 个。在 `$DSH_RUNTIME`（默认
+  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 164 通过 / 3 跳过 /
   0 失败：三个「真实目录」schema 用例只有把 `MCP_REVIEW_CATALOG` 指向评审用 210 工具目录的
-  本地副本时才运行（此时 164 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。CI
-  （`.github/workflows/test.yml`，Node 22 与 24）既没有解包运行时、也没有该目录，于是 17 个
-  依赖运行时的用例 + 3 个真实目录用例跳过：144 通过 / 20 跳过 / 0 失败。
+  本地副本时才运行（此时 167 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。CI
+  （`.github/workflows/test.yml`，Node 22 与 24）既没有解包运行时、也没有该目录，于是 18 个
+  依赖运行时的用例 + 3 个真实目录用例跳过：146 通过 / 21 跳过 / 0 失败。
 - `node scripts/repro-review.mjs`——评审缺陷**回归门**（默认 `--expect fixed`）。它把
   2026-11-19 评审的六组缺陷在当前代码上重放，只有一组都不复现时才 exit 0；否则打印
   `REGRESSION: <families>` 并 exit 1。凡是能观察到「修好后的结果」的组（准入、控制队列、

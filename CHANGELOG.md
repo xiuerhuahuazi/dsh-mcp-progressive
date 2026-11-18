@@ -56,7 +56,12 @@ Fixed:
 - An abort during `restart` (the panel aborts at its 10 s deadline) now restores
   the pre-restart preference on a fresh, non-aborted bounded budget and reports
   `rollback` in the response, so the stop's persisted `disabled: true` can no
-  longer survive the interrupted request.
+  longer survive the interrupted request. A non-abort stop failure (for example
+  the 30 s phase timeout on a live caller) restores the same saved preference and
+  reports `rollback` too, while a restart of an already-disabled server performs
+  no rollback write (`rollback: null`) (`F1b: a timed-out stop during restart
+  restores the preference and reports the rollback`; `F1b: a failed restart of an
+  already-disabled server performs no rollback write`).
 - Manager calls take the earlier of the operation deadline and a per-call 5 s
   budget, and the 30 s operation budget starts when the task reaches the head of
   the queue rather than when it joined it; phase waits are bounded and
@@ -87,7 +92,9 @@ Fixed:
   no matching call"). The audit trail is now an in-result line on every
   returned result (`(audit: dispatched <tool>; argument keys: …)`) — a rare
   internal pipeline failure still throws — kept next to the empty-output
-  fallback sentence, and an `alwaysVisible` target needs no transient shadow.
+  fallback sentence (whitespace-only nested content keeps that fallback too,
+  `F12: whitespace-only nested content keeps the no-output fallback`), and an
+  `alwaysVisible` target needs no transient shadow.
 - Corrective unknown-tool text distinguishes "registered but not loaded in this
   conversation" from "not in this MCP catalog right now".
 - The corrective `tools/pre-execute` handler (not `mcp_load`) refuses a call to
@@ -110,7 +117,7 @@ Changed:
 
 - The Host half is split into `lib/patch.js`, `lib/search.js` and
   `lib/management.js`; the pure helpers are exported through `__test` and
-  covered by a `node --test` suite (164 tests, CI on Node 22 and 24).
+  covered by a `node --test` suite (167 tests, CI on Node 22 and 24).
 - The plugin declares one runtime dependency, `yaml` `^2.9.1`, for the patch
   rewrite.
 - The management half activates only where `pluginManager`, `profileContext`,

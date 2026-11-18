@@ -57,10 +57,10 @@ files; a test may cover several rows.
 | P1-5 — no prompt hint that the catalog exists | Fixed | `index.js` · `systemPrompt.section({ name: 'mcp-progressive:catalog', order: 3050, text })` — server names/counts up to 4, `mcp_search` pointer, empty catalog contributes `''` | `test/core.test.mjs` › `P1-5: the catalog prompt section is per-assembly and contributes nothing without a catalog` |
 | P1-6 — `mcp_call` drops the MCP error body and presentation meta | Partially fixed | `index.js` · `contentText`, error branch of `mcp_call.execute` returns `Error from MCP tool "…": <server text>` (dedupes the native `Error: ` wrapper); `pendingResults` + `projectContent` forward content blocks and images. Nested `meta` has no seam into the outer card — documented in `README.md` → Limitations | `test/core.test.mjs` › `P1-6: mcp_call returns the MCP error text content instead of a bare message` |
 | P1-7 — `mcp_server` has no approval gate | Fixed | `index.js` · `tools/pre-execute` handler returns `{ kind: 'ask', reason, displayReason }` for `mcp_server` start/stop/restart; `displayReason` is a `{ en, zh }` locale record as the platform contract declares (audit F6); `mcp_servers` and the browser routes are not gated | `test/core.test.mjs` › `P1-7: mcp_server writes ask for approval while mcp_servers stays ungated` |
-| P1-8 — untestable pure helpers; no test script | Fixed | Host half split into `lib/patch.js` / `lib/search.js` / `lib/management.js`; `index.js` · `__test` exports the seams; `test/*.test.mjs` with `node --test`; `package.json` declares `"test": "node --test"` (set before this lane) | `test/smoke.test.mjs` › `__test exposes the stable pure-helper seam`; `the pure helpers behave as documented`; whole suite: `npm test` → 164 cases (see Evidence run) |
+| P1-8 — untestable pure helpers; no test script | Fixed | Host half split into `lib/patch.js` / `lib/search.js` / `lib/management.js`; `index.js` · `__test` exports the seams; `test/*.test.mjs` with `node --test`; `package.json` declares `"test": "node --test"` (set before this lane) | `test/smoke.test.mjs` › `__test exposes the stable pure-helper seam`; `the pure helpers behave as documented`; whole suite: `npm test` → 167 cases (see Evidence run) |
 | P1-9 — fail-open never self-heals | Fixed | `index.js` · `reconcile` sets `state.masked = false` in the catch and `true` only after a restriction install; `system-prompt/assemble` safety net tests `disclosures.get(agent)?.masked !== true`; failure log names the agent id and catalog size | `test/core.test.mjs` › `P1-9: a failed restriction install is retried by the assemble safety net`; `P1-9: a failed reconcile logs the agent id and the catalog size` |
 | P1-10 — PTC guidance branch is dead code | Fixed | `index.js` · `ptcRefusalGuidance` checks the result text (and the thrown message as fallback) for `run_code`; applied to result and error paths before returning/throwing | `test/core.test.mjs` › `P1-10: a PTC refusal returned as a result yields the guidance string` |
-| P1-11 — nested MCP dispatch missing from the session log | Fixed (revised after the core audit: logging it was a P0 history bug) | `index.js` · `mcp_call` passes **no** `log` to the nested `ctx.tools.execute`; `auditLine` (target + argument keys) is attached to every post-dispatch return path (a rare internal `ToolBatchExecutionError` still throws, thread intact); `projectContent` only replaces the result content when the nested call produced blocks (the empty-output fallback sentence survives) | `test/core.test.mjs` › `P1-11: mcp_call leaves a real Session history with no orphan tool result`; `P1-11: the nested call is always reported in the result audit line` |
+| P1-11 — nested MCP dispatch missing from the session log | Fixed (revised after the core audit: logging it was a P0 history bug) | `index.js` · `mcp_call` passes **no** `log` to the nested `ctx.tools.execute`; `auditLine` (target + argument keys) is attached to every post-dispatch return path (a rare internal `ToolBatchExecutionError` still throws, thread intact); `projectContent` only replaces the result content when the nested call produced real text or an image block, so the empty-output fallback sentence survives (including whitespace-only content, F12) | `test/core.test.mjs` › `P1-11: mcp_call leaves a real Session history with no orphan tool result`; `P1-11: the nested call is always reported in the result audit line`; `F12: whitespace-only nested content keeps the no-output fallback` |
 | P1-12 — global `warnOnce` silences other agents | Fixed (strengthened by the core audit: keyed by the Agent object, not its id) | `index.js` · `warnOnce(kind, agent, text)` keeps a `WeakMap<Agent, Set<kind>>` (with a set for non-object agents) | `test/core.test.mjs` › `P1-12: warnOnce keys include the agent identity`; `F5: warnOnce distinguishes two Agents that share an id` |
 | P1-13 — documentation contradicts the code | Fixed | `README.md` / `CHANGELOG.md` / `docs/fix-map.md` / `docs/security.md` (this lane): tool count 5, cache note wording, cost model, `~/.dsh/cordis.patch.yml`, management security, disabled-content-type rule, install 1.2.1, `yaml` dependency, tests section, limitations | This table; `git show` of the two docs commits |
 
@@ -102,27 +102,27 @@ Environment: this worktree (1.2.1), Node v25.8.0, macOS, unpacked runtime presen
 
 ```
 $ npm test                      # unpacked runtime present, MCP_REVIEW_CATALOG unset
-ℹ tests 164
-ℹ pass 161
+ℹ tests 167
+ℹ pass 164
 ℹ fail 0
 ℹ skipped 3
 
 $ MCP_REVIEW_CATALOG=<local copy of the review catalog> npm test
-ℹ tests 164
-ℹ pass 164
+ℹ tests 167
+ℹ pass 167
 ℹ fail 0
 ℹ skipped 0
 
 $ DSH_RUNTIME=/nonexistent npm test      # what CI runs (no runtime, no catalog)
-ℹ tests 164
-ℹ pass 144
+ℹ tests 167
+ℹ pass 146
 ℹ fail 0
-ℹ skipped 20
+ℹ skipped 21
 ```
 
 The 3 cases skipped in the default local posture are the real-catalog schema cases; they only
 run when `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (private,
-not committed). The 20 CI skips are those 3 plus the 17 runtime-dependent cases.
+not committed). The 21 CI skips are those 3 plus the 18 runtime-dependent cases.
 
 ```
 $ node scripts/repro-review.mjs
@@ -186,13 +186,14 @@ Statuses are for this tree.
 | F6 — the cost endpoints have no committed artifact and the “after” value differs between runs | P3 | Documented — the after endpoint is now a range (≈49–51k chars, 48,671 vs 50,832 in two runs) labelled one uncontrolled capture; no artifact is committed | docs-only (`README.md` → Cost) |
 | F7 — live-boot never performs a valid authenticated toggle | P3 | Documented coverage boundary — the gate is a rejection matrix; valid toggles are covered by `repro-review` probe C against the fake environment (`docs/security.md` §7.1) | docs-only |
 | F8 — P2-8 absent from Limitations | P3 | Fixed — Limitations bullet for agent/preset-scoped MCP tools | docs-only (`README.md` → Limitations) |
-| F9 — empty-content audit fallback dropped the fallback sentence | P3 | Fixed — content is only replaced when the nested call produced blocks | `test/core.test.mjs` › `P1-11: the nested call is always reported in the result audit line` |
+| F9 — empty-content audit fallback dropped the fallback sentence | P3 | Fixed — content is only replaced when the nested call produced real text or an image block | `test/core.test.mjs` › `P1-11: the nested call is always reported in the result audit line` |
+| F12 — whitespace-only nested content was projected, dropping the no-output fallback | P3 | Fixed — only real text or an image block is projected; whitespace-only content keeps the fallback sentence plus the audit line | `test/core.test.mjs` › `F12: whitespace-only nested content keeps the no-output fallback` |
 
 ### Security audit — verdict: **ship-with-notes** (no auth bypass, no corruption, no credential leak)
 
 | Finding | Severity | Status | Regression |
 |---|---|---|---|
-| F1 — an abort during `restart` persisted `disabled: true` with no rollback | P1 | Fixed — the abort path restores the preference on a fresh, non-aborted bounded signal and reports `rollback` | `test/management.test.mjs` › `F1: an abort mid-restart restores the preference instead of leaving disabled: true`; `F1: an abort at the stop/start boundary restores the pre-restart preference` |
+| F1/F1b — an abort during `restart` (F1) or a non-abort stop failure such as the 30 s phase timeout (F1b) left `disabled: true` persisted with no rollback | P1 | Fixed — both paths restore the saved preference (the abort path on a fresh, non-aborted bounded signal) and report `rollback`; an already-disabled restart performs no rollback write (`rollback: null`) | `test/management.test.mjs` › `F1: an abort mid-restart restores the preference instead of leaving disabled: true`; `F1: an abort at the stop/start boundary restores the pre-restart preference`; `F1b: a timed-out stop during restart restores the preference and reports the rollback`; `F1b: a failed restart of an already-disabled server performs no rollback write` |
 | F2 — a BOM-prefixed (platform-valid) patch file was rejected | P2 | Fixed — BOM stripped for the AST, re-emitted on write, byte prefix preserved | `test/patch.test.mjs` › `a BOM-prefixed patch is platform-valid and toggleable`; `a BOM-only patch behaves like an empty one`; `applyPatchOverride round-trips a BOM-prefixed file and keeps the prefix` |
 | F3 — the per-call 5 s manager bound was dead | P2 | Fixed — `boundedDeadline` takes the earlier of the operation deadline and the per-call budget | `test/management.test.mjs` › `F3: boundedDeadline takes the earlier of the operation and per-call budgets`; `F3: a hung listPlugins fails on the per-call budget, not the 30 s operation deadline` |
 | F4 — a queued operation inherited an enqueue-time deadline | P2 | Fixed — the budget starts when the task reaches the head of the queue | `test/management.test.mjs` › `F4: a queued operation gets its budget when it starts, not when it joined the queue` |

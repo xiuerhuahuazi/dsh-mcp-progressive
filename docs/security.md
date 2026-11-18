@@ -62,9 +62,10 @@ Every handler runs the same sequence, and each step answers before any state is 
    queue (not when it joined it). A stalled inventory/phase read (`listPlugins`) answers
    `504`; a stalled enable write (`setPluginEnabled`) surfaces as `500` carrying the
    manager diagnostic. A phase wait times out at 30 s with `500` and the observed state.
-   The request's `close`/`aborted` events abort the wait (and a `restart` interrupted by
-   an abort restores the pre-restart preference on a fresh, non-aborted signal and
-   reports `rollback`).
+   The request's `close`/`aborted` events abort the wait. A `restart` that is interrupted
+   — by an abort or by a non-abort stop failure such as the 30 s phase timeout — restores
+   the saved pre-restart preference (the abort path on a fresh, non-aborted signal) and
+   reports `rollback`; an already-disabled restart performs no rollback write.
 
 JSON answers always carry `content-type: application/json; charset=utf-8`,
 `cache-control: no-store` and an explicit `content-length`. Error payloads add
@@ -216,10 +217,10 @@ baseline modes pass and the fixed modes fail, and on this release the reverse.
 
 The real-runtime smoke fixture that previously lacked a Host `connection` service is fixed in
 `02fe061`: `mountPlugin()` now provides it (and `mountPlugin({ connection: false })` models a
-host without it). With the runtime present `npm test` is 164 tests, 161 pass / 3 skip /
+host without it). With the runtime present `npm test` is 167 tests, 164 pass / 3 skip /
 0 fail (the three optional real-catalog cases skip unless `MCP_REVIEW_CATALOG` points at a
-local copy of the review catalog, which makes it 164 pass / 0 skip), and on CI — no runtime,
-no catalog — it is 164 tests, 144 pass / 20 skip / 0 fail.
+local copy of the review catalog, which makes it 167 pass / 0 skip), and on CI — no runtime,
+no catalog — it is 167 tests, 146 pass / 21 skip / 0 fail.
 
 ### 7.4 Independent audits (2026-11-19)
 
@@ -242,8 +243,8 @@ the final code:
   Agent/SystemPrompt seams are still stubbed) and F7 is recorded as the live-boot gate's
   coverage boundary in §7.1.
 
-Final postures on this tree: `npm test` 164 tests — 161 pass / 3 skip / 0 fail locally,
-164 pass / 0 skip with `MCP_REVIEW_CATALOG`, 144 pass / 20 skip / 0 fail on a runtime-less
+Final postures on this tree: `npm test` 167 tests — 164 pass / 3 skip / 0 fail locally,
+167 pass / 0 skip with `MCP_REVIEW_CATALOG`, 146 pass / 21 skip / 0 fail on a runtime-less
 CI; `node scripts/repro-review.mjs` PASS `0/6`; `node scripts/live-boot.mjs` PASS `9/9`
 (real boot).
 
