@@ -31,8 +31,8 @@ files; a test may cover several rows.
 
 | Item | Status | What changed (file · function) | Regression evidence (test file › test name) |
 |---|---|---|---|
-| S1 — management routes: no auth / origin / content-type check | Fixed | `lib/management.js` · `rejectUntrusted` (calls `connection.requestRejection`, `503` when the service or its fence is absent, fail-closed on throw), `requireMethod` (405 + `Allow`), `checkJsonContentType` (requires `application/json`, `415` for a missing or non-JSON header); `index.js` · management `ctx.inject([... 'connection'])` so the half does not activate without the fence | `test/management.test.mjs` › `every route answers a rejected admission with JSON before doing anything`; `a 401 rejection status is preserved in the JSON answer`; `a connection fence that throws fails closed`; `all three routes fail closed with 503 when the connection service is absent`; `POST routes refuse a declared non-JSON content type`; `a POST with a JSON body but no content-type header is a 415 with zero manager calls`; `methods are enforced with an allow header`; `test/core.test.mjs` › `management admission requires the Host connection service` |
-| S2 — `enabled` missing/typed as non-boolean becomes "stop" | Fixed | `lib/management.js` · `validateBodyObject`, `validateAddressing`, `validateEnabled` run before lookup/enqueue | `test/management.test.mjs` › `enabled must be a real boolean and bad bodies never enqueue work` |
+| S1 — management routes: no auth / origin / content-type check | Fixed | `lib/management.js` · `rejectUntrusted` (calls `connection.requestRejection`, `503` when the service or its fence is absent, fail-closed on throw), `requireMethod` (405 + `Allow`), `checkJsonContentType` (requires `application/json`, `415` for a missing or non-JSON header); `index.js` · management `ctx.inject([... 'connection'])` so the half does not activate without the fence | `test/management.test.mjs` › `every route answers a rejected admission with JSON before doing anything`; `a 401 rejection status is preserved in the JSON answer`; `a connection fence that throws fails closed`; `all three routes fail closed with 503 when the connection service is absent`; `POST routes refuse a declared non-JSON content type`; `a POST with a JSON body but no content-type header is a 415 with zero manager calls`; `methods are enforced with an allow header`; `test/core.test.mjs` › `management admission requires the Host connection service`; `scripts/live-boot.mjs` (default gate, real boot 9/9): `401`/`403` admission, `403` bad `Host`, `415` text/plain and missing content type, `405` + `Allow`, `400` bad body, `200` authenticated, patch layers byte-identical |
+| S2 — `enabled` missing/typed as non-boolean becomes "stop" | Fixed | `lib/management.js` · `validateBodyObject`, `validateAddressing`, `validateEnabled` run before lookup/enqueue | `test/management.test.mjs` › `enabled must be a real boolean and bad bodies never enqueue work`; `scripts/live-boot.mjs` probes `toggle-missing-enabled` / `toggle-enabled-string` → `400` |
 | S3 — hand-written YAML rewrite corrupts the patch | Fixed | `lib/patch.js` · `parsePatchDocument`, `lastOverride`, `flattenInsertRows`, `effectiveDisabled`, `snapshotOf`, `verifyRewrite`, `setPatchDisabled` (AST only; append verified top-level override for insert-only rows) | `test/patch.test.mjs` › `setPatchDisabled keeps every reviewed fixture valid with the intended flag` (23 fixtures); `rewrites keep comments, CRLF line endings and block scalars`; `setPatchDisabled refuses text it cannot turn into a valid sequence`; `a row that only lives inside an insert group gets a top-level override`; `applyPatchOverride writes a top-level override for an insert-only home row`; also `scripts/repro-review.mjs` probe A: `0/23` valid inputs turn unparseable |
 | S4 — file transaction: mode downgrade, weak backup, lost edits, non-atomic fallback | Fixed (process-local; cross-process lock deferred) | `lib/patch.js` · `resolveWritePath` (realpath; dangling symlink refused), `existingMode`, `writeAtomically` (`wx` + random suffix + `chmod` + `rename`), `backupPatchFile` (0600, throws), `writePatchFile` (CAS, 3 attempts), `applyPatchOverride` (re-reads inside the transaction) | `test/patch.test.mjs` › `backupPatchFile writes the snapshot next to the real file, mode 0600, and reports failure`; `writePatchFile defaults to 0600, preserves an existing mode and leaves no temp files`; `writePatchFile refuses to overwrite content it did not read`; `applyPatchOverride edits the current file, keeps 0600 and backs up the old bytes`; `two sequential edits on one file both survive`; `applyPatchOverride keeps a symlinked dotfile a symlink and backs up the real target`; `applyPatchOverride throws and leaves the original bytes when the result cannot be validated`; `applyPatchOverride fails visibly when the backup cannot be written`; `applyPatchOverride refuses a missing patch file` |
 | S5 — control plane uses a stale snapshot, early success, no rollback, no bounds | Fixed | `lib/management.js` · `createControlQueue`, `runOperation` (re-reads rows inside the task), `changeServerEnabled`, `restartServer` (preference rollback), `waitForServerPhase` (real unload, `failed` is failure), `awaitBounded`, `phaseFailure`, `operationResult` | `test/management.test.mjs` › `stop and start issued together run in order and end enabled`; `a start whose fiber fails is a failure, with the diagnostic surfaced`; `a restart whose start step fails reports the failure and the observed state`; `the control queue bounds its backlog and refuses with 429`; `the HTTP routes answer 429 when the queue is full`; `a hung listPlugins cannot block the phase wait forever`; `a hung listPlugins cannot block the state route forever`; `waitForServerPhase stops early on request abort`; `waitForServerPhase does not report a still-unloading row as stopped`; `a server that never reaches its phase is a bounded 500, not a hang` |
@@ -97,39 +97,73 @@ Limitations.
 
 ## Evidence run
 
-Environment: this worktree, Node v25.8.0, macOS, unpacked runtime present at
+Environment: this worktree (1.2.1), Node v25.8.0, macOS, unpacked runtime present at
 `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`.
 
 ```
-$ npm test
+$ npm test                      # unpacked runtime present, MCP_REVIEW_CATALOG unset
 ℹ tests 152
-ℹ pass 151
-ℹ fail 1
-```
+ℹ pass 149
+ℹ fail 0
+ℹ skipped 3
 
-The single failure is a stale fixture, not a product regression:
-`test/smoke.test.mjs` › `with the real runtime: the catalog is hidden from the agent but
-present globally` mounts the plugin with `mountPlugin()`, which provides no Host
-`connection` service, so the (correctly gated) management half stays inactive there while
-the case expects `mcp_server`/`mcp_servers` and the routes. It is skipped on CI because the
-runtime is absent. Details in `docs/security.md` §7.2.
+$ MCP_REVIEW_CATALOG=<local copy of the review catalog> npm test
+ℹ tests 152
+ℹ pass 152
+ℹ fail 0
+ℹ skipped 0
 
-```
-$ DSH_RUNTIME=/nonexistent MCP_REVIEW_CATALOG=/nonexistent.json npm test
+$ DSH_RUNTIME=/nonexistent npm test      # what CI runs (no runtime, no catalog)
 ℹ tests 152
 ℹ pass 132
 ℹ fail 0
 ℹ skipped 20
 ```
 
+The 3 cases skipped in the default local posture are the real-catalog schema cases; they only
+run when `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (private,
+not committed). The 20 CI skips are those 3 plus the 17 runtime-dependent cases.
+
 ```
 $ node scripts/repro-review.mjs
-  0/6 defect families reproduced
+  ok  yaml  S3 — hand-written YAML rewrite corrupts a valid patch file
+  ok  managementAdmission  S1/S2 — the management routes have no admission and coerce `enabled`
+  ok  controlQueue  S5 — a stop and a start issued together execute only the stop
+  ok  client  S11 — a failed panel action is cleared by the next poll
+  ok  search  S9 — the catalog search is AND-shaped and case-sensitive
+  ok  fullSchema  S10 — `detail:"full"` prints an invalid JSON schema
+  0/6 defect families reproduced (6 evaluated, 0 skipped)
+  PASS — no reviewed defect reproduces (regression gate)
 $ echo $?
-1
+0
 ```
 
-`scripts/repro-review.mjs` is a baseline generator: exit 0 means a defect still reproduces,
-so exit 1 with `0/6` is the fixed state. `scripts/live-boot.mjs --expect fixed` needs the
-unpacked runtime; its recorded expectation table and the raw status matrix observed for this
-release are in `docs/security.md`.
+Without the DSH runtime the YAML family prints `skip` (the platform insert/override rule
+cannot be stubbed honestly), `5 evaluated, 1 skipped`, and the gate still exits 0 when
+nothing reproduces.
+
+```
+$ node scripts/live-boot.mjs        # default --expect fixed, real boot
+  ok  state-unauthenticated    status=401  expected=401|403 (admitted by 401)
+  ok  state-bad-host           status=403  expected=403
+  ok  toggle-text-plain        status=415  expected=415
+  ok  toggle-get-method        status=405  expected=405
+  ok  toggle-missing-enabled   status=400  expected=400
+  ok  toggle-enabled-string    status=400  expected=400
+  ok  toggle-no-content-type   status=415  expected=415
+  ok  state-wrong-method       status=405  expected=405
+  ok  state-authenticated      status=200  expected=200
+
+  PASS  (1058 ms)
+```
+
+`live-boot` also snapshots both patch layers before and after the probes and fails unless
+they are byte-identical: every rejected probe changed nothing.
+
+Gate semantics: `repro-review`'s default `--expect fixed` is the regression gate (exit 0 = no
+reviewed defect reproduces); `--expect baseline` is the historical 1.2.0 evidence mode and
+only passes on a `v1.2.0` checkout. `live-boot`'s default `--expect fixed` is the real-platform
+gate (real DSH boot, `node:http` so `Host` is sent, real cookie); `--expect baseline` only
+matches `v1.2.0`. Both gates were checked against the `v1.2.0` tag in both directions by the
+regression lane: on `v1.2.0` the baseline modes pass and the fixed modes fail, and on this
+release the reverse.

@@ -240,25 +240,36 @@ What follows from the formula:
 
 Everything runs locally with no network and no access to `~/.dsh`:
 
-- `npm test` — the suite in `test/` (`node --test`), **152** tests. On CI
-  (`.github/workflows/test.yml`, Node 22 and 24) the unpacked DSH runtime and the review's
-  catalog are absent, so the 20 cases that need them skip themselves: 132 pass / 20 skip. With
-  the runtime at `$DSH_RUNTIME` (default `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`) all 152
-  run — currently 151 pass and 1 fail: the real-runtime smoke case
-  `the catalog is hidden from the agent but present globally` mounts the plugin through a
-  harness root that provides no Host `connection` service, so the (correctly) gated management
-  half does not register there and the fixture's expectation is stale. The fixture, not the
-  plugin, needs the service added; the same gate has its own passing test,
-  `management admission requires the Host connection service` (see [docs/security.md](docs/security.md)).
-- `node scripts/repro-review.mjs` — replays the six defect families from the 2026-11-19 review
-  (YAML rewrite, route admission, control queue, client panel, search, full schema) against the
-  current code. It is a **baseline evidence generator**, not a pass/fail test: exit 0 means all
-  six still reproduce, exit 1 means at least one is gone. On 1.2.1 it prints
-  `0/6 defect families reproduced` and exits 1 — the expected fixed state.
-- `node scripts/live-boot.mjs --expect fixed` — boots a throw-away real DSH web instance
-  (`DSH_HOME` in a temp directory, OS-assigned port) with the package installed and probes the
-  management routes; it needs the unpacked runtime. The status matrix observed for this release
-  is recorded in [docs/security.md](docs/security.md).
+- `npm test` — the suite in `test/` (`node --test`), **152** tests. With the unpacked DSH
+  runtime present (`$DSH_RUNTIME`, default `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`) it
+  is 149 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
+  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 152 pass
+  / 0 skip; the catalog is private and not committed). On CI (`.github/workflows/test.yml`,
+  Node 22 and 24) neither the runtime nor that catalog exists, so the 17 runtime-dependent and
+  the 3 real-catalog cases skip: 132 pass / 20 skip / 0 fail.
+- `node scripts/repro-review.mjs` — the review-defect **regression gate** (default
+  `--expect fixed`). It replays the six defect families from the 2026-11-19 review and exits 0
+  only when none of them reproduces; otherwise it prints `REGRESSION: <families>` and exits 1.
+  Where a family can observe the repaired outcome (admission, control queue, rendered panel
+  message, search recall, schema fitting) the gate requires that outcome too, so a partial
+  regression cannot hide behind "not reproduced". On this checkout it prints
+  `0/6 defect families reproduced` / `PASS` and exits 0. `--expect baseline` is the historical
+  1.2.0 evidence mode: it passes only on a `v1.2.0` checkout (6/6 reproduced) and otherwise
+  reports `NOT A 1.2.0 CHECKOUT`. Without the DSH runtime the YAML family is reported as
+  `skip`, never as a pass.
+- `node scripts/live-boot.mjs` — the real-platform end-to-end gate (default `--expect fixed`).
+  It boots a throw-away real DSH web instance (`DSH_HOME` in a temp directory, OS-assigned
+  port) with the package installed, mints the browser session cookie and drives the routes
+  with `node:http`, so an explicit `Host` header really reaches the server. It accepts
+  `401|403` for the unauthenticated probe and asserts `403` for a bad `Host`, `415` for
+  `text/plain` and for a missing content type, `405` + `Allow` for the wrong method, `400` for
+  a bad body and `200` authenticated — and that both patch layers are byte-identical
+  afterwards: `PASS (9/9)`. `--expect baseline` documents the 1.2.0 matrix and only matches a
+  `v1.2.0` checkout. Without the unpacked runtime it falls back to an in-process HTTP server
+  behind a stub fence and reports `mode: fallback-http`, `platformAuthority: false`.
+
+Both gates were checked against the `v1.2.0` tag in both directions by the regression lane: on
+`v1.2.0` the baseline modes pass and the fixed modes fail, and on this release the reverse.
 
 The tests use three worlds: the real DSH runtime (real Cordis, real `dsh-tools`), a fake plugin
 context for the HTTP routes, and a fake browser for `client.js`. The review-item → fix → test
@@ -484,21 +495,31 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
 
 全部本地运行，不联网、不读写 `~/.dsh`：
 
-- `npm test`——`test/` 下的测试（`node --test`），共 **152** 个。CI（`.github/workflows/test.yml`，
-  Node 22 与 24）没有解包运行时、也没有评审用的真实目录，依赖它们的 20 个用例自动跳过：
-  132 通过 / 20 跳过。在 `$DSH_RUNTIME`（默认 `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）
-  有解包运行时的情况下 152 个全跑——当前是 151 通过、1 失败：真实运行时用例
-  `the catalog is hidden from the agent but present globally` 通过一个**不提供 Host `connection`
-  服务**的 harness 根挂载插件，于是（被正确门控的）管理半侧不会注册，而该用例的期望已过时。需要
-  补上服务的是夹具而不是插件；同一道门控有自己的通过用例
-  `management admission requires the Host connection service`（见 [docs/security.md](docs/security.md)）。
-- `node scripts/repro-review.mjs`——把 2026-11-19 评审的六组缺陷（YAML 改写、路由准入、控制队列、
-  客户端面板、检索、完整 schema）在当前代码上重放。它是**基线证据生成器**而不是通过/失败测试：
-  exit 0 表示六组仍全部复现，exit 1 表示至少一组已消失。1.2.1 上输出
-  `0/6 defect families reproduced` 并 exit 1——这正是修好后的状态。
-- `node scripts/live-boot.mjs --expect fixed`——用临时 `DSH_HOME` 和操作系统分配的端口启动一个
-  真实 DSH Web 实例并探测管理路由；需要解包运行时。本版本观察到的状态矩阵记录在
-  [docs/security.md](docs/security.md)。
+- `npm test`——`test/` 下的测试（`node --test`），共 **152** 个。在 `$DSH_RUNTIME`（默认
+  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 149 通过 / 3 跳过 /
+  0 失败：三个「真实目录」schema 用例只有把 `MCP_REVIEW_CATALOG` 指向评审用 210 工具目录的
+  本地副本时才运行（此时 152 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。CI
+  （`.github/workflows/test.yml`，Node 22 与 24）既没有解包运行时、也没有该目录，于是 17 个
+  依赖运行时的用例 + 3 个真实目录用例跳过：132 通过 / 20 跳过 / 0 失败。
+- `node scripts/repro-review.mjs`——评审缺陷**回归门**（默认 `--expect fixed`）。它把
+  2026-11-19 评审的六组缺陷在当前代码上重放，只有一组都不复现时才 exit 0；否则打印
+  `REGRESSION: <families>` 并 exit 1。凡是能观察到「修好后的结果」的组（准入、控制队列、
+  面板渲染出的操作消息、检索召回、schema 适配），门也要求那个结果，因此局部回退无法藏在
+  「未复现」后面。本检出输出 `0/6 defect families reproduced` / `PASS` 且 exit 0。
+  `--expect baseline` 是历史的 1.2.0 证据模式：只有在 `v1.2.0` 检出上才通过（6/6 复现），
+  否则报告 `NOT A 1.2.0 CHECKOUT`。没有 DSH 运行时的情况下 YAML 那组报告为 `skip`，绝不当作
+  通过。
+- `node scripts/live-boot.mjs`——真实平台的端到端门（默认 `--expect fixed`）。它用临时
+  `DSH_HOME` 和操作系统分配的端口启动一个真实 DSH Web 实例并安装本包，从启动令牌换取浏览器
+  cookie，再用 `node:http` 探测路由（因此显式 `Host` 真的会到达服务器）。未认证探针接受
+  `401|403`，并断言坏 `Host` → `403`、`text/plain` 与缺少 content-type → `415`、错误方法 →
+  `405` 带 `Allow`、坏 body → `400`、已认证 → `200`，且事后两层补丁文件逐字节不变：
+  `PASS (9/9)`。`--expect baseline` 记录 1.2.0 矩阵，只在 `v1.2.0` 检出上成立。没有解包运行时
+  时退回进程内 HTTP 服务器 + 桩围栏，并报告 `mode: fallback-http`、
+  `platformAuthority: false`。
+
+回归线已用 `v1.2.0` 标签双向核对这两个门：在 `v1.2.0` 上 baseline 模式通过、fixed 模式失败；
+在本版本上相反。
 
 测试使用三个世界：真实 DSH 运行时（真实 Cordis、真实 `dsh-tools`）、用于 HTTP 路由的假插件
 上下文、以及驱动 `client.js` 的假浏览器。评审条目 → 修复 → 测试的对应表在

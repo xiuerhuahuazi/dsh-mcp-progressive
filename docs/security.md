@@ -145,57 +145,64 @@ gate itself is `test/core.test.mjs` › `management admission requires the Host 
 
 Reproduce with ephemeral state only: point `DSH_HOME` at a `mkdtemp` directory, boot with
 `--port 0`, mint the cookie with one `GET /?token=…`, and remove the directory afterwards.
-`scripts/live-boot.mjs` does exactly that for the boot/cleanup, but see the next section.
+`scripts/live-boot.mjs` automates exactly this and is the release gate; §7 records its expected matrix.
 
-## 7. Known gaps in the verification tooling (not fixed in this lane)
+## 7. Verification gates
 
-### 7.1 `scripts/live-boot.mjs --expect fixed` expects the wrong matrix
+Both scripts are release gates now; CI runs neither (`npm test` is CI's gate).
 
-`scripts/live-boot.mjs --expect fixed` boots the same isolated instance but probes with
-`fetch` and a stale expectation table. Observed on this release:
+### 7.1 Real boot — `node scripts/live-boot.mjs` (default `--expect fixed`)
 
-```
-FAIL  state-unauthenticated    status=401  expected=403
-FAIL  state-bad-host           status=200  expected=403
-FAIL  toggle-text-plain        status=401  expected=415
-FAIL  toggle-get-method        status=401  expected=405
-FAIL  toggle-missing-enabled   status=401  expected=400
-FAIL  toggle-enabled-string    status=401  expected=400
-ok    state-authenticated      status=200  expected=200
-FAIL  (1941 ms)
-```
+It creates a throw-away `DSH_HOME`, installs this package into a `test` profile, boots
+`dsh --profile test --port 0 --no-open`, mints the browser cookie from the launch token,
+drives the routes with `node:http` (so an explicit `Host` really reaches the server),
+snapshots both patch layers before and after, and requires every probe to match.
 
-Three causes, all in the script, not the plugin:
+| Probe | Accepted | Observed on 1.2.1 |
+|---|---|---|
+| `state-unauthenticated` | `401` or `403`, JSON refusal | `401` (no authenticated peer) |
+| `state-bad-host` | `403`, JSON refusal | `403` |
+| `toggle-text-plain` | `415` | `415` |
+| `toggle-get-method` | `405`, `Allow: POST` | `405` |
+| `toggle-missing-enabled` | `400` | `400` |
+| `toggle-enabled-string` | `400` | `400` |
+| `toggle-no-content-type` | `415` | `415` |
+| `state-wrong-method` (`POST /state`) | `405`, `Allow: GET, HEAD` | `405` |
+| `state-authenticated` | `200` | `200` |
 
-1. it expects `403` where the platform's admission returns `401` for an unauthenticated
-   caller (both are the platform's verdict; the plugin passes it through);
-2. it sends the POST probes without the cookie, so admission answers `401` before method
-   and body checks are reached;
-3. `state-bad-host` uses `fetch`, which silently drops a custom `Host` header, so the
-   probe is an ordinary loopback request with a valid cookie — `200` is the correct
-   answer to what was actually sent. The raw-table above (row 3) shows `403` when the
-   header is really sent.
+`state-unauthenticated` accepts either status because the platform may reject the request at
+the Host/Origin fence (`403`) or, once the Host is accepted, for the missing authenticated
+peer (`401`); both are the platform's verdict and the plugin passes them through. The gate
+also requires the two patch layers to be byte-identical afterwards — every rejected probe
+changed nothing — and it asserts the JSON refusal shape (`{ok:false,error}`) instead of a
+body-less reset. `--expect baseline` documents the 1.2.0 matrix and only matches a v1.2.0
+checkout. Without the unpacked runtime the script falls back to an in-process HTTP server
+behind a stub fence and reports `mode: fallback-http`, `platformAuthority: false` — the
+handler contract, not the platform wiring.
 
-`scripts/` is outside this documentation lane's write scope; the release owner should
-either authenticate every probe and switch to a raw socket, or record the `401` matrix.
-Until then, treat section 6 as the verified evidence and the script as a boot harness.
+### 7.2 Repro gate — `node scripts/repro-review.mjs` (default `--expect fixed`)
 
-### 7.2 One real-runtime smoke fixture is stale
+It replays the six reviewed defect families and exits 0 only when none reproduces (exit 1
+with `REGRESSION: <families>` otherwise); where a family can observe the repaired outcome
+(management admission, control queue, rendered panel message, search recall, schema fitting)
+it requires that outcome too. Its management family drives the real handlers with a
+**stub** connection fence that mirrors the platform (untrusted `Host` → `403`, no cookie →
+`401`) — `scripts/live-boot.mjs` remains the real-platform authority. Without the DSH
+runtime the YAML family reports `skip` (the platform insert/override rule cannot be stubbed
+honestly) and the gate still exits 0 when nothing reproduces; a skip is never a pass.
+`--expect baseline` is the historical 1.2.0 mode and passes only on a v1.2.0 checkout.
 
-`npm test` with the unpacked runtime currently ends `152 tests / 151 pass / 1 fail`. The
-failing case is `test/smoke.test.mjs` › `with the real runtime: the catalog is hidden from
-the agent but present globally`: it asserts that `mcp_server`, `mcp_servers` and the three
-routes are registered, but `mountPlugin()` in `test/harness.mjs` provides only
-`pluginManager`, `profileContext`, `webServer` and `loader`. The management half is now
-injected with `connection` as well (correctly — the gate is the security fix), so it stays
-inactive in that mount. CI does not see this because the case skips without a runtime.
-The fixture is stale, not the plugin: the gate itself passes in
-`test/core.test.mjs` › `management admission requires the Host connection service`, and the
-management routes are covered by `createManagementEnv()`, which does provide `connection`.
+Both gates were checked against the `v1.2.0` tag in both directions: on `v1.2.0` the
+baseline modes pass and the fixed modes fail, and on this release the reverse.
 
-Reproduce: `npm test` → `ℹ tests 152 / ℹ pass 151 / ℹ fail 1` (2026-11-19, this worktree,
-Node v25.8.0, unpacked runtime present). Without the runtime the same suite is
-`132 pass / 20 skip / 0 fail`, which is what CI runs.
+### 7.3 Fixture note
+
+The real-runtime smoke fixture that previously lacked a Host `connection` service is fixed in
+`02fe061`: `mountPlugin()` now provides it (and `mountPlugin({ connection: false })` models a
+host without it). With the runtime present `npm test` is 149 pass / 3 skip / 0 fail (the three
+optional real-catalog cases skip unless `MCP_REVIEW_CATALOG` points at a local copy of the
+review catalog, which makes it 152 pass / 0 skip), and on CI — no runtime, no catalog — it is
+132 pass / 20 skip / 0 fail.
 
 ## 8. Residual risks / deferred
 
