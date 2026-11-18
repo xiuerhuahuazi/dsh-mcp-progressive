@@ -24,7 +24,9 @@
  *                  ordinary native tools from the next step (and can be unloaded)
  *      mcp_call    run one hidden tool directly through the full tool pipeline
  * 4. answers a guessed-but-unregistered `mcp__*` call with a corrective message
- *    instead of a bare unknown-tool error.
+ *    instead of a bare unknown-tool error;
+ * 5. advertises the hidden catalog in one short prompt section, so the model
+ *    knows it exists without every schema being sent.
  *
  * State is per live Agent (Session); unloading is explicit. Loaded tools are native:
  * they go through policy/approval/timeout/post-execute exactly like first-party tools.
@@ -120,23 +122,46 @@ export function apply(ctx, rawConfig) {
   const enableCall = config.enableCall !== false
   const manageServers = config.manageServers !== false
 
-  /** Loaded tool names per live agent id; absent = only the eager baseline. */
-  const loadedByAgent = new Map()
+  /**
+   * Loaded tool names per live Agent. Keyed by object identity, not by
+   * `agent.id`: the disclosure restriction is owned by the agent's own scope
+   * object, so two agents that ever share an id (a raced disposal, a resumed
+   * session) must never share a mask. A WeakMap also lets the registry drop
+   * state with the agent instead of leaking it until an explicit event.
+   */
+  const loadedByAgent = new WeakMap()
   /** Assembled request payloads produced by mcp_call, keyed by its outer execution. */
-  const pendingContent = new WeakMap()
+  const pendingResults = new WeakMap()
   /** Monotonic correlator for nested dispatches. */
   let nestedSeq = 0
 
   const agentKey = (agent) => (agent === undefined || agent === null ? undefined : agent.id)
 
+  /**
+   * Whether one agent is a delegated subagent. Subagents start from a smaller
+   * baseline: `eagerTools` is a root-conversation decision (it buys a stable
+   * prompt for the whole session), and every subagent inheriting it pays the
+   * cost again in a short-lived context. When the session metadata is not
+   * available the agent is treated as a root, the pre-1.2.1 behaviour.
+   */
+  const isSubagent = (agent) => {
+    try {
+      const header = agent?.session?.header
+      if (header === null || typeof header !== 'object') return false
+      if (header.origin === 'subagent') return true
+      return Number.isSafeInteger(header.delegationDepth) && header.delegationDepth > 0
+    } catch {
+      return false
+    }
+  }
+
   /** Names loaded for one agent (falls back to the configuration baseline). */
   const loadedSet = (agent) => {
-    const key = agentKey(agent)
-    if (key === undefined) return eagerTools
-    let set = loadedByAgent.get(key)
+    if (agentKey(agent) === undefined) return eagerTools
+    let set = loadedByAgent.get(agent)
     if (set === undefined) {
-      set = new Set(eagerTools)
-      loadedByAgent.set(key, set)
+      set = new Set(isSubagent(agent) ? [] : eagerTools)
+      loadedByAgent.set(agent, set)
     }
     return set
   }
@@ -191,17 +216,20 @@ export function apply(ctx, rawConfig) {
   // The deny list only changes when the catalog changes (a server connects or
   // disconnects), which keeps the prompt's tool array stable per session.
   // ---------------------------------------------------------------------------
-  /** Per-agent disclosure state: the restriction and the scope-local shadows. */
-  const disclosures = new Map()
-  /** `restrict()`/`register()` emit `tools/change`; do not re-enter it. */
-  let mutating = false
-  /** A reconcile asked for while `mutating`; replayed after the mutation. */
-  let reconcilePending = false
-  /** Warn at most once per kind instead of once per agent. */
+  /**
+   * Per-agent disclosure state: the restriction and the scope-local shadows,
+   * keyed by the Agent the restriction is installed for. WeakMap identity is
+   * what keeps a mask attached to the scope that owns it (see `loadedByAgent`).
+   */
+  const disclosures = new WeakMap()
+  /** Live states in creation order; a WeakMap is not iterable for teardown. */
+  const liveStates = new Set()
+  /** Warn at most once per (kind, agent) instead of once per kind globally. */
   const warned = new Set()
-  const warnOnce = (kind, text) => {
-    if (warned.has(kind)) return
-    warned.add(kind)
+  const warnOnce = (kind, agent, text) => {
+    const key = `${kind}:${String(agentKey(agent))}`
+    if (warned.has(key)) return
+    warned.add(key)
     ctx.logger?.warn?.(text)
   }
 
@@ -227,20 +255,22 @@ export function apply(ctx, rawConfig) {
   }
 
   /** Read (or create) one agent's disclosure state. */
-  const stateOf = (key) => {
-    let state = disclosures.get(key)
+  const stateOf = (agent) => {
+    let state = disclosures.get(agent)
     if (state === undefined) {
-      state = { restriction: undefined, deniedKey: undefined, shadows: new Map(), temps: new Set() }
-      disclosures.set(key, state)
+      state = { restriction: undefined, deniedKey: undefined, masked: false, shadows: new Map(), temps: new Set() }
+      disclosures.set(agent, state)
+      liveStates.add(state)
     }
     return state
   }
 
   /** Drop every disclosure effect owned for one agent. */
-  const dropDisclosure = (key) => {
-    const state = disclosures.get(key)
+  const dropDisclosure = (agent) => {
+    const state = disclosures.get(agent)
     if (state === undefined) return
-    disclosures.delete(key)
+    disclosures.delete(agent)
+    liveStates.delete(state)
     try {
       state.restriction?.()
     } catch {
@@ -261,20 +291,18 @@ export function apply(ctx, rawConfig) {
   const reconcile = (agent) => {
     const key = agentKey(agent)
     if (key === undefined) return
-    if (mutating) {
-      reconcilePending = true
-      return
-    }
     const scope = scopeFor(agent)
+    const state = stateOf(agent)
     if (scope === undefined) {
-      warnOnce('scope', 'mcp-progressive: agent scope unavailable; MCP tool schemas are not hidden for that agent')
+      warnOnce('scope', agent, `mcp-progressive: agent scope unavailable for "${String(key)}"; MCP tool schemas are not hidden for that agent`)
       return
     }
-    mutating = true
-    reconcilePending = false
+    // `restrict()`/`register()` only queue the coalesced reconcile microtask, so
+    // this body cannot re-enter itself (the old `mutating` flags were dead code).
+    let catalogSize = 0
     try {
-      const state = stateOf(key)
       const catalog = catalogDefinitions()
+      catalogSize = catalog.length
       const definitions = new Map(catalog.map((definition) => [definition.name, definition]))
       const loaded = loadedSet(agent)
       // Refresh loaded shadows; a reconnected server replaces its definition.
@@ -296,7 +324,7 @@ export function apply(ctx, rawConfig) {
         try {
           state.shadows.set(name, { dispose: scope.tools.register(definition), definition })
         } catch (error) {
-          warnOnce('shadow', `mcp-progressive: could not load one MCP tool into the agent scope: ${messageOf(error)}`)
+          warnOnce('shadow', agent, `mcp-progressive: could not load one MCP tool into the agent scope: ${messageOf(error)}`)
         }
       }
       // The restriction only has to deny what configuration never shows.
@@ -307,13 +335,17 @@ export function apply(ctx, rawConfig) {
         }, [])
         .sort()
       const deniedKey = deny.join('\u0000')
-      if (state.restriction === undefined || state.deniedKey !== deniedKey) {
+      // `masked` records that a restriction is actually in force, not merely that
+      // state exists: a failed install must stay retryable (the assemble safety
+      // net keys off this flag, so fail-open can self-heal).
+      if (!state.masked || state.restriction === undefined || state.deniedKey !== deniedKey) {
         // Install first, dispose last: restrictions intersect, so the overlap is
         // still fully masked, and a rejected `restrict()` leaves the old mask on.
         const installed = deny.length === 0 ? undefined : scope.tools.restrict({ deny })
         const previous = state.restriction
         state.restriction = installed
         state.deniedKey = deny.length === 0 ? undefined : deniedKey
+        state.masked = true
         try {
           previous?.()
         } catch {
@@ -333,14 +365,12 @@ export function apply(ctx, rawConfig) {
       }
     } catch (error) {
       // Never let disclosure bookkeeping break agent creation or a tools/change
-      // notification; the next reconcile retries.
-      ctx.logger?.warn?.(`mcp-progressive: disclosure reconcile failed: ${messageOf(error)}`)
-    } finally {
-      mutating = false
-      if (reconcilePending) {
-        reconcilePending = false
-        queueMicrotask(() => reconcile(agent))
-      }
+      // notification. Clear `masked` so the next assemble retries instead of
+      // trusting state that was never installed.
+      state.masked = false
+      ctx.logger?.warn?.(
+        `mcp-progressive: disclosure reconcile failed for agent "${String(key)}" with ${catalogSize} catalog tool(s): ${messageOf(error)}`,
+      )
     }
   }
 
@@ -376,14 +406,16 @@ export function apply(ctx, rawConfig) {
     return undefined
   })
   ctx.on('tools/change', scheduleReconcileAll)
-  // Safety net for a step of an agent this instance has not reconciled yet
-  // (plugin loaded mid-Session, or an agent whose creation raced activation).
-  // The provider has already collected this assembly's schemas, so this covers
-  // the next step; nothing here may fail a model request.
+  // Safety net for a step of an agent without a mask in force (plugin loaded
+  // mid-Session, an agent whose creation raced activation, or a reconcile that
+  // failed to install). `masked` — not "state exists" — is the test, so a
+  // fail-open reconcile is retried here. The provider has already collected
+  // this assembly's schemas, so this covers the next step; nothing here may
+  // fail a model request.
   ctx.on('system-prompt/assemble', async (assembly, context, next) => {
     try {
-      const key = agentKey(context?.scope)
-      if (key !== undefined && !disclosures.has(key)) reconcile(context.scope)
+      const agent = context?.scope ?? context?.agent
+      if (agentKey(agent) !== undefined && disclosures.get(agent)?.masked !== true) reconcile(agent)
     } catch {
       // Disclosure bookkeeping must never break prompt assembly.
     }
@@ -391,7 +423,23 @@ export function apply(ctx, rawConfig) {
   })
   ctx.effect(
     () => () => {
-      for (const key of [...disclosures.keys()]) dropDisclosure(key)
+      for (const state of [...liveStates]) {
+        try {
+          state.restriction?.()
+        } catch {
+          // The scope is already gone; nothing is left to lift.
+        }
+        for (const shadow of state.shadows.values()) {
+          try {
+            shadow.dispose()
+          } catch {
+            // Same: the owning scope is being torn down.
+          }
+        }
+        state.shadows.clear()
+        state.temps.clear()
+      }
+      liveStates.clear()
     },
     'mcp-progressive: disclosure restrictions',
   )
@@ -399,18 +447,59 @@ export function apply(ctx, rawConfig) {
   reconcileAll()
 
   // ---------------------------------------------------------------------------
-  // Corrective answer for hallucinated MCP tool names.
+  // Corrective answer for a tool the model called directly: not loaded yet, or
+  // loaded by mcp_load earlier in the SAME step (the step's admission set was
+  // resolved before the load, so dispatch would fail as unknown tool).
   // ---------------------------------------------------------------------------
   if (config.correctiveUnknownTool !== false) {
     ctx.on('tools/pre-execute', async (exec, next) => {
       try {
         if (typeof exec?.name !== 'string' || !isCatalogName(exec.name)) return await next()
-        if (ctx.tools.get(exec.name, exec.agent) !== undefined) return await next()
+        const agent = exec.agent
+        const visible = ctx.tools.get(exec.name, agent) !== undefined
+        if (visible) {
+          if (exec.toolSet !== undefined && exec.toolSet.view(agent).get(exec.name) === undefined) {
+            return {
+              kind: 'deny',
+              reason:
+                `MCP tool "${exec.name}" was loaded in this step; call it in the next step — ` +
+                'do not batch mcp_load with the call.',
+            }
+          }
+          return await next()
+        }
+        const globallyRegistered = ctx.tools.get(exec.name) !== undefined
         return {
           kind: 'deny',
-          reason:
-            `MCP tool "${exec.name}" is not registered on this Harness (MCP tools are discovered at runtime). ` +
-            'Call mcp_search to find the right tool, then mcp_load or mcp_call.',
+          reason: globallyRegistered
+            ? `MCP tool "${exec.name}" is registered but not loaded in this conversation. ` +
+              'Call mcp_search to find it, then mcp_load it (or mcp_call it directly).'
+            : `MCP tool "${exec.name}" is not in this MCP catalog right now (MCP tools register when a server connects). ` +
+              'Call mcp_search to find the right tool name.',
+        }
+      } catch {
+        return await next()
+      }
+    })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Approval gate for model-facing MCP server writes. The three browser routes
+  // stay ungated on purpose: a human clicking in the panel is the consent.
+  // ---------------------------------------------------------------------------
+  if (manageServers) {
+    ctx.on('tools/pre-execute', async (exec, next) => {
+      try {
+        if (exec?.name !== 'mcp_server') return await next()
+        const action = exec.arguments?.action
+        if (action !== 'start' && action !== 'stop' && action !== 'restart') return await next()
+        const server = typeof exec.arguments?.server === 'string' && exec.arguments.server !== ''
+          ? exec.arguments.server
+          : 'the target server'
+        return {
+          kind: 'ask',
+          reason: `mcp_server will ${action} MCP server "${server}", changing which MCP tools exist for every session.`,
+          displayReason: `${action === 'stop' ? 'Stop' : action === 'restart' ? 'Restart' : 'Start'} MCP server "${server}"?`,
         }
       } catch {
         return await next()
@@ -423,10 +512,10 @@ export function apply(ctx, rawConfig) {
   // ---------------------------------------------------------------------------
   ctx.on('agent/disposed', (payload) => {
     try {
-      const key = agentKey(payload?.agent)
-      if (key === undefined) return
-      loadedByAgent.delete(key)
-      dropDisclosure(key)
+      const agent = payload?.agent
+      if (agentKey(agent) === undefined) return
+      loadedByAgent.delete(agent)
+      dropDisclosure(agent)
     } catch {
       // Cleanup is best-effort; a malformed payload must not disturb disposal.
     }
@@ -527,22 +616,35 @@ export function apply(ctx, rawConfig) {
           }
 
           const known = new Set(catalogOf().map((entry) => entry.name))
+          const state = disclosures.get(agent)
+          /** Whether a loaded name is actually visible (not just booked). */
+          const visible = (toolName) => allowVisible(toolName) || state?.shadows.has(toolName) === true
           const accepted = []
           const rejected = []
+          let searchHint = false
           for (const toolName of names) {
             if (!isCatalogName(toolName)) {
               rejected.push(`${toolName} (not an MCP tool)`)
+              searchHint = true
               continue
             }
             if (!known.has(toolName)) {
               rejected.push(`${toolName} (not in the current MCP catalog)`)
+              searchHint = true
               continue
             }
             if (unload) {
               if (loaded.delete(toolName)) accepted.push(toolName)
               else rejected.push(`${toolName} (was not loaded)`)
             } else if (loaded.has(toolName)) {
-              rejected.push(`${toolName} (already loaded)`)
+              // Already booked: say whether it is actually native right now. A
+              // missing shadow happens when its registration failed, and unload
+              // then load is the only way to retry it.
+              rejected.push(
+                visible(toolName)
+                  ? `${toolName} (already loaded: it is a native tool in this conversation; call it directly)`
+                  : `${toolName} (already loaded but not visible in this conversation; pass it with unload:true, then load it again)`,
+              )
             } else {
               loaded.add(toolName)
               accepted.push(toolName)
@@ -562,12 +664,64 @@ export function apply(ctx, rawConfig) {
             )
           }
           if (rejected.length > 0) lines.push(`Skipped: ${rejected.join('; ')}`)
-          if (accepted.length === 0 && rejected.length > 0) {
+          if (accepted.length === 0 && searchHint) {
             lines.push('Use mcp_search to confirm exact tool names.')
           }
           return lines.join('\n')
         },
       }),
+    )
+  }
+
+  /**
+   * The current `{ turn, step }` of one agent, when its session log exposes an
+   * open step (the last event between `step/start` and `step/end`). Nested
+   * `ctx.tools.execute` needs this to record its own `tool/call`/`tool/result`.
+   * Absent session internals are not an error: the caller falls back to an
+   * in-result audit line.
+   */
+  const currentStep = (agent) => {
+    try {
+      const log = agent?.session?.log
+      if (!Array.isArray(log)) return undefined
+      for (let index = log.length - 1; index >= 0; index -= 1) {
+        const event = log[index]
+        if (event?.type === 'step/end') return undefined
+        if (event?.type !== 'step/start') continue
+        const turn = event.data?.turn
+        const step = event.data?.step
+        if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(step)) return undefined
+        return { turn, step }
+      }
+      return undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** One-line audit trail for a nested call whose step cannot be logged. */
+  const auditLine = (toolName, callArguments) => {
+    const keys = Object.keys(callArguments ?? {})
+    return `(audit: dispatched ${toolName}; argument keys: ${keys.length > 0 ? keys.join(', ') : 'none'})`
+  }
+
+  /** Text blocks of one MCP result, joined the way the caller sees them. */
+  const contentText = (content) =>
+    (Array.isArray(content) ? content : [])
+      .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text)
+      .join('\n')
+
+  /**
+   * Guidance for a PTC refusal. The PTC executor answers a direct nested call
+   * with an error RESULT ("only run_code is callable directly"), not a throw,
+   * so both the result text and a thrown message are checked.
+   */
+  const ptcRefusalGuidance = (toolName, text) => {
+    if (typeof text !== 'string' || !/run_code/.test(text)) return undefined
+    return (
+      'Error: this agent runs in PTC mode, where mcp_call cannot dispatch a tool directly. ' +
+      `Use mcp_load for ${toolName}, then call it inside run_code.`
     )
   }
 
@@ -614,36 +768,38 @@ export function apply(ctx, rawConfig) {
           const callId = `${String(exec.callId)}:mcp-progressive:${nestedSeq}`
           // A scope-local registration is exempt from the disclosure restriction,
           // so shadowing exactly this one definition admits it for the nested
-          // dispatch (and for nothing else) without lifting the mask.
+          // dispatch (and for nothing else) without lifting the mask. An
+          // alwaysVisible target is never restricted, so it needs no shadow.
           const scope = scopeFor(exec.agent)
-          const state = disclosures.get(agentKey(exec.agent))
+          const state = disclosures.get(exec.agent)
           const alreadyShadowed = state?.shadows.has(toolName) === true
+          const needsShadow = scope !== undefined && !alreadyShadowed && !allowVisible(toolName)
           let shadow
-          if (scope !== undefined && !alreadyShadowed) {
+          if (needsShadow) {
             try {
               shadow = scope.tools.register(definition)
               state?.temps.add(toolName)
             } catch (error) {
-              warnOnce('call-shadow', `mcp-progressive: mcp_call could not shadow its target: ${messageOf(error)}`)
+              warnOnce('call-shadow', exec.agent, `mcp-progressive: mcp_call could not shadow its target: ${messageOf(error)}`)
             }
           }
+          // The nested dispatch is a real tool call; record it like one when the
+          // session's current step is readable. Otherwise the transcript only
+          // shows the outer mcp_call, so at least describe the target in the result.
+          const log = currentStep(exec.agent)
+          const audit = log === undefined ? auditLine(toolName, callArguments) : undefined
+          const withAudit = (text) => (audit === undefined ? text : `${text}\n${audit}`)
           let batch
           try {
             batch = await ctx.tools.execute({
               calls: [{ type: 'tool-call', id: callId, name: toolName, arguments: JSON.stringify(callArguments) }],
               signal: exec.signal,
               agent: exec.agent,
+              ...(log === undefined ? {} : { log }),
             })
           } catch (error) {
-            const message = messageOf(error)
-            // The PTC preset only allows `run_code` at the top level; a nested raw
-            // batch is rejected there, so say what works instead of failing raw.
-            if (/run_code/.test(message)) {
-              return (
-                'Error: this agent runs in PTC mode, where mcp_call cannot dispatch a tool directly. ' +
-                `Use mcp_load for ${toolName}, then call it inside run_code.`
-              )
-            }
+            const refusal = ptcRefusalGuidance(toolName, messageOf(error))
+            if (refusal !== undefined) return refusal
             throw error
           } finally {
             try {
@@ -655,38 +811,76 @@ export function apply(ctx, rawConfig) {
           }
           const outcome = Array.isArray(batch?.results) ? batch.results[0]?.result : undefined
           if (outcome === undefined) {
-            return `Error: MCP tool "${toolName}" produced no result.`
+            return withAudit(`Error: MCP tool "${toolName}" produced no result.`)
           }
-          if (outcome.isError === true) {
-            throw new Error(outcome.error?.message ?? `MCP tool "${toolName}" failed`)
-          }
-          // Deferred context belongs to the nested batch; forward it to the caller.
+          // Deferred context belongs to the nested batch; forward it to the caller
+          // on both success and failure.
           if (Array.isArray(batch?.additionalContexts)) {
             for (const context of batch.additionalContexts) exec.deferContext(context)
           }
           if (batch?.concluded === true) exec.concludeTurn()
           const content = Array.isArray(outcome.content) ? outcome.content : []
-          if (content.length > 0) pendingContent.set(exec, content)
-          const text = content
-            .filter((block) => block?.type === 'text' && typeof block.text === 'string')
-            .map((block) => block.text)
-            .join('\n')
-          if (text.trim() !== '') return text
+          if (outcome.isError === true) {
+            const text = contentText(content).trim()
+            const message = typeof outcome.error?.message === 'string' ? outcome.error.message : ''
+            const refusal = ptcRefusalGuidance(toolName, text !== '' ? text : message)
+            if (refusal !== undefined) return refusal
+            // Return the MCP error as readable text instead of a bare thrown
+            // message: the content blocks carry the server's own explanation.
+            // The native executor wraps a thrown tool message as "Error: <message>";
+            // when the content is exactly that wrapper, the message alone is the
+            // server's text. `outcome.meta` (presentation) has no seam here — a
+            // tool's `meta` can only come from its own output.presentationMeta, so
+            // the outer mcp_call card keeps the text rendering.
+            const detail = text === '' ? (message !== '' ? message : 'no error message') : (text === `Error: ${message}` ? message : text)
+            return withAudit(`Error from MCP tool "${toolName}": ${detail}`)
+          }
+          if (content.length > 0 || audit !== undefined) pendingResults.set(exec, { content, audit })
+          const text = contentText(content)
+          if (text.trim() !== '') return withAudit(text)
           const imageCount = content.filter((block) => block?.type === 'image').length
-          return imageCount > 0 ? `(${toolName} returned ${imageCount} image(s).)` : `(${toolName} completed with no output.)`
+          return withAudit(
+            imageCount > 0 ? `(${toolName} returned ${imageCount} image(s).)` : `(${toolName} completed with no output.)`,
+          )
         },
         // Replace the text fallback with the exact blocks the MCP tool produced,
-        // preserving images and their admission-owned attachment references.
+        // preserving images and their admission-owned attachment references. An
+        // in-result audit line is appended as one extra text block so it survives
+        // the projection.
         projectContent(exec, result) {
-          const content = pendingContent.get(exec)
-          if (content === undefined) return undefined
-          pendingContent.delete(exec)
+          const pending = pendingResults.get(exec)
+          if (pending === undefined) return undefined
+          pendingResults.delete(exec)
           if (result?.isError === true) return undefined
-          return content
+          const blocks = pending.audit === undefined ? [] : [{ type: 'text', text: pending.audit }]
+          if (pending.content.length === 0) return blocks.length > 0 ? blocks : undefined
+          return blocks.length > 0 ? [...pending.content, ...blocks] : pending.content
         },
       }),
     )
   }
+
+  // ---------------------------------------------------------------------------
+  // Catalog discoverability: one short prompt section so the model knows the
+  // hidden catalog exists at all. `text` recomputes per assembly from the
+  // global catalog, and an empty catalog contributes nothing. This section is
+  // placed just before the platform's own MCP_SERVERS section.
+  // ---------------------------------------------------------------------------
+  ctx.inject(['systemPrompt'], (promptCtx) => {
+    promptCtx.systemPrompt.section({
+      name: 'mcp-progressive:catalog',
+      order: 3050,
+      text: () => {
+        const counts = new Map()
+        for (const entry of catalogOf()) counts.set(entry.server, (counts.get(entry.server) ?? 0) + 1)
+        if (counts.size === 0) return ''
+        const servers = [...counts.entries()].sort((left, right) => left[0].localeCompare(right[0]))
+        const shown = servers.slice(0, 4).map(([server, count]) => `${server} (${count} tool${count === 1 ? '' : 's'})`)
+        const more = servers.length > shown.length ? `, +${servers.length - shown.length} more` : ''
+        return `MCP catalog: ${shown.join(', ')}${more}; not loaded by default — mcp_search to find one.`
+      },
+    })
+  })
 
   // ---------------------------------------------------------------------------
   // Optional management half: list / start / stop MCP server rows.
