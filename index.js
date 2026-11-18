@@ -225,12 +225,25 @@ export function apply(ctx, rawConfig) {
   const disclosures = new WeakMap()
   /** Live states in creation order; a WeakMap is not iterable for teardown. */
   const liveStates = new Set()
-  /** Warn at most once per (kind, agent) instead of once per kind globally. */
-  const warned = new Set()
+  /** Warn at most once per (kind, Agent) instead of once per kind globally. */
+  const warned = new WeakMap()
+  /** Kinds already warned for agents that are not usable WeakMap keys. */
+  const warnedUnkeyed = new Set()
   const warnOnce = (kind, agent, text) => {
-    const key = `${kind}:${String(agentKey(agent))}`
-    if (warned.has(key)) return
-    warned.add(key)
+    // Object identity, not `agent.id`: two agents that share an id must not
+    // silence each other, and a disposed agent's set is collected with it.
+    let kinds
+    if (agent !== null && typeof agent === 'object') {
+      kinds = warned.get(agent)
+      if (kinds === undefined) {
+        kinds = new Set()
+        warned.set(agent, kinds)
+      }
+    } else {
+      kinds = warnedUnkeyed
+    }
+    if (kinds.has(kind)) return
+    kinds.add(kind)
     ctx.logger?.warn?.(text)
   }
 
@@ -682,33 +695,7 @@ export function apply(ctx, rawConfig) {
     )
   }
 
-  /**
-   * The current `{ turn, step }` of one agent, when its session log exposes an
-   * open step (the last event between `step/start` and `step/end`). Nested
-   * `ctx.tools.execute` needs this to record its own `tool/call`/`tool/result`.
-   * Absent session internals are not an error: the caller falls back to an
-   * in-result audit line.
-   */
-  const currentStep = (agent) => {
-    try {
-      const log = agent?.session?.log
-      if (!Array.isArray(log)) return undefined
-      for (let index = log.length - 1; index >= 0; index -= 1) {
-        const event = log[index]
-        if (event?.type === 'step/end') return undefined
-        if (event?.type !== 'step/start') continue
-        const turn = event.data?.turn
-        const step = event.data?.step
-        if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(step)) return undefined
-        return { turn, step }
-      }
-      return undefined
-    } catch {
-      return undefined
-    }
-  }
-
-  /** One-line audit trail for a nested call whose step cannot be logged. */
+  /** One-line in-result audit trail for the nested dispatch (no session event). */
   const auditLine = (toolName, callArguments) => {
     const keys = Object.keys(callArguments ?? {})
     return `(audit: dispatched ${toolName}; argument keys: ${keys.length > 0 ? keys.join(', ') : 'none'})`
@@ -792,23 +779,24 @@ export function apply(ctx, rawConfig) {
               warnOnce('call-shadow', exec.agent, `mcp-progressive: mcp_call could not shadow its target: ${messageOf(error)}`)
             }
           }
-          // The nested dispatch is a real tool call; record it like one when the
-          // session's current step is readable. Otherwise the transcript only
-          // shows the outer mcp_call, so at least describe the target in the result.
-          const log = currentStep(exec.agent)
-          const audit = log === undefined ? auditLine(toolName, callArguments) : undefined
-          const withAudit = (text) => (audit === undefined ? text : `${text}\n${audit}`)
+          // The nested dispatch is a real tool call, but it must not append
+          // session events: a surface `tool/result` for a call that no assistant
+          // message declares leaves an orphan tool message in
+          // `session.deriveMessages()`, and the DeepSeek adapter rejects that on
+          // the next request (INVALID_REQUEST "tool result has no matching
+          // call"). The audit trail is the in-result line instead.
+          const audit = auditLine(toolName, callArguments)
+          const withAudit = (text) => `${text}\n${audit}`
           let batch
           try {
             batch = await ctx.tools.execute({
               calls: [{ type: 'tool-call', id: callId, name: toolName, arguments: JSON.stringify(callArguments) }],
               signal: exec.signal,
               agent: exec.agent,
-              ...(log === undefined ? {} : { log }),
             })
           } catch (error) {
             const refusal = ptcRefusalGuidance(toolName, messageOf(error))
-            if (refusal !== undefined) return refusal
+            if (refusal !== undefined) return withAudit(refusal)
             throw error
           } finally {
             try {
@@ -833,7 +821,7 @@ export function apply(ctx, rawConfig) {
             const text = contentText(content).trim()
             const message = typeof outcome.error?.message === 'string' ? outcome.error.message : ''
             const refusal = ptcRefusalGuidance(toolName, text !== '' ? text : message)
-            if (refusal !== undefined) return refusal
+            if (refusal !== undefined) return withAudit(refusal)
             // Return the MCP error as readable text instead of a bare thrown
             // message: the content blocks carry the server's own explanation.
             // The native executor wraps a thrown tool message as "Error: <message>";
@@ -844,7 +832,10 @@ export function apply(ctx, rawConfig) {
             const detail = text === '' ? (message !== '' ? message : 'no error message') : (text === `Error: ${message}` ? message : text)
             return withAudit(`Error from MCP tool "${toolName}": ${detail}`)
           }
-          if (content.length > 0 || audit !== undefined) pendingResults.set(exec, { content, audit })
+          // Only project when the nested call produced blocks: an empty result
+          // keeps the returned string (fallback sentence + audit line) as the
+          // outer content, so the fallback text is not dropped.
+          if (content.length > 0) pendingResults.set(exec, { content, audit })
           const text = contentText(content)
           if (text.trim() !== '') return withAudit(text)
           const imageCount = content.filter((block) => block?.type === 'image').length
@@ -861,9 +852,7 @@ export function apply(ctx, rawConfig) {
           if (pending === undefined) return undefined
           pendingResults.delete(exec)
           if (result?.isError === true) return undefined
-          const blocks = pending.audit === undefined ? [] : [{ type: 'text', text: pending.audit }]
-          if (pending.content.length === 0) return blocks.length > 0 ? blocks : undefined
-          return blocks.length > 0 ? [...pending.content, ...blocks] : pending.content
+          return [...pending.content, { type: 'text', text: pending.audit }]
         },
       }),
     )

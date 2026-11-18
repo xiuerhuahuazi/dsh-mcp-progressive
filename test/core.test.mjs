@@ -23,6 +23,7 @@ import {
   makeAgent,
   mountPlugin,
   registerTool,
+  runtimeImport,
 } from './harness.mjs'
 
 const plugin = await import(PLUGIN_ENTRY)
@@ -390,45 +391,122 @@ runtimeTest('P1-10: a PTC refusal returned as a result yields the guidance strin
 // P1-11 — nested call auditability.
 // ---------------------------------------------------------------------------
 
-runtimeTest('P1-11: the nested dispatch carries the derived step and logs both events', async () => {
+runtimeTest('P1-11: mcp_call leaves a real Session history with no orphan tool result', async () => {
+  // Real dsh-session Session, in the exact event order dsh-agent-loop uses:
+  // step/start -> assistant message declaring the outer mcp_call -> tool events.
+  // A nested surface tool/call + tool/result here would leave a tool message in
+  // deriveMessages() that no assistant message declares, which the DeepSeek
+  // adapter rejects on the next request; the regression asserts the history
+  // stays valid instead of asserting the plugin's own append calls.
+  const { Session } = await runtimeImport('dsh-session')
+  const { createUserMessage, createAssistantMessage } = await runtimeImport('dsh-llm')
+  const outerCallId = 'outer-call-1'
+  const sessionId = 'core-mcp-call-history'
+  const session = Session.create(
+    sessionId,
+    undefined,
+    { version: 4, id: sessionId, createdAt: Date.now(), isSeeded: false },
+    0,
+  )
+  session.append('turn/start', { turn: 1 })
+  session.append(
+    'user/message',
+    createUserMessage({ content: [{ type: 'text', text: 'please call it' }] }),
+    { surfaceOp: 'append' },
+  )
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append(
+    'assistant/message',
+    {
+      turn: 1,
+      step: 1,
+      message: createAssistantMessage({
+        content: [
+          {
+            type: 'tool-call',
+            id: outerCallId,
+            name: 'mcp_call',
+            arguments: JSON.stringify({ tool: 'mcp__rea__search', arguments: { q: 'x' } }),
+          },
+        ],
+        source: { provider: 'deepseek', model: 'deepseek-flash' },
+      }),
+    },
+    { surfaceOp: 'append' },
+  )
+
   const mounted = await mountPlugin()
-  const agent = await mounted.createAgent('logged-agent')
-  const appended = []
-  agent.session.log = [
-    { type: 'turn/start', data: { turn: 2 } },
-    { type: 'step/start', data: { turn: 2, step: 3 } },
-  ]
-  agent.session.append = (type, data) => {
-    appended.push({ type, name: data?.name })
-    return { seq: appended.length }
+  const agent = await mounted.createAgent('history-agent')
+  agent.session = session
+
+  const batch = await mounted.root.tools.execute({
+    calls: [
+      {
+        id: outerCallId,
+        name: 'mcp_call',
+        arguments: JSON.stringify({ tool: 'mcp__rea__search', arguments: { q: 'x' } }),
+      },
+    ],
+    agent,
+    signal: new AbortController().signal,
+    log: { turn: 1, step: 1 },
+  })
+  const outer = batch.results[0]?.result
+  assert.notEqual(outer?.isError, true, 'mcp_call succeeds')
+
+  // (a) The plugin appends no nested `tool/call`/`tool/result` pair at all.
+  assert.equal(
+    JSON.stringify(session.log).includes(':mcp-progressive:'),
+    false,
+    'no synthetic nested call id appears in the session log',
+  )
+
+  // (b) Every tool result in the derived history matches a declared call.
+  const messages = session.deriveMessages()
+  const declared = new Set()
+  const orphans = []
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      declared.clear()
+      for (const block of message.content) if (block.type === 'tool-call') declared.add(block.id)
+    } else if (message.role === 'tool') {
+      if (!declared.delete(message.toolCallId)) orphans.push(message.toolCallId)
+    }
   }
+  assert.deepEqual(orphans, [], 'every tool result has a matching tool call in the history')
+  const toolMessages = messages.filter((message) => message.role === 'tool')
+  assert.equal(toolMessages.length, 1, 'only the outer mcp_call is a tool message')
+  assert.equal(toolMessages[0].toolCallId, outerCallId, 'the surviving tool message belongs to the declared call')
 
-  const { result } = await callTool(mounted.root, agent, 'mcp_call', { tool: 'mcp__rea__search', arguments: { q: 'x' } })
-  assert.equal(resultText(result), 'ok', 'no audit line is needed when the step is loggable')
-
-  const nested = mounted.nested.find((batch) => (batch?.calls ?? []).some((call) => call.name === 'mcp__rea__search'))
-  assert.deepEqual(nested?.log, { turn: 2, step: 3 }, 'the nested execute receives log {turn, step}')
-  assert.deepEqual(appended.map((entry) => entry.type), ['tool/call', 'tool/result'], 'both nested events are recorded')
-  assert.equal(appended[0]?.name, 'mcp__rea__search', 'the nested tool name is the logged name')
+  // (c) The audit trail lives in the result, not in the session.
+  assert.match(resultText(outer), /\n\(audit: dispatched mcp__rea__search; argument keys: q\)$/, 'the audit line is in the result')
 })
 
-runtimeTest('P1-11: an underivable step falls back to an in-result audit line', async () => {
+runtimeTest('P1-11: the nested call is always reported in the result audit line', async () => {
   const mounted = await mountPlugin()
   const agent = await mounted.createAgent('unlogged-agent')
-  // A closed step: the last boundary is step/end, so no open step exists.
-  agent.session.log = [
-    { type: 'step/start', data: { turn: 1, step: 1 } },
-    { type: 'step/end', data: { turn: 1, step: 1 } },
-  ]
   const { result } = await callTool(mounted.root, agent, 'mcp_call', {
     tool: 'mcp__rea__search',
     arguments: { q: 'x', limit: 2 },
   })
   const nested = mounted.nested.find((batch) => (batch?.calls ?? []).some((call) => call.name === 'mcp__rea__search'))
-  assert.equal(nested?.log, undefined, 'a closed step is not logged as the current one')
+  assert.equal(nested?.log, undefined, 'the nested dispatch is never given a session log')
   const text = resultText(result)
-  assert.match(text, /^ok\n\(audit: dispatched mcp__rea__search/, 'the result starts with the output, then the audit line')
-  assert.match(text, /argument keys: q, limit/, 'the audit line names the argument keys')
+  assert.match(text, /^ok\n\(audit: dispatched mcp__rea__search; argument keys: q, limit\)$/, 'audit line follows the output')
+
+  // An empty nested result keeps the "no output" fallback sentence AND the audit
+  // line: the projection must not replace the fallback with the audit block.
+  const empty = await mountPlugin()
+  const emptyAgent = await empty.createAgent('empty-agent')
+  const restore = stubNestedResult(empty, 'mcp__rea__search', { isError: false, content: [], value: 'gone' })
+  try {
+    const emptyCall = await callTool(empty.root, emptyAgent, 'mcp_call', { tool: 'mcp__rea__search', arguments: {} })
+    const emptyText = resultText(emptyCall.result)
+    assert.match(emptyText, /mcp__rea__search completed with no output\./, 'the fallback sentence is kept')
+    assert.match(emptyText, /\n\(audit: dispatched mcp__rea__search; argument keys: none\)$/, 'and so is the audit line')
+  } finally {
+    restore()
+  }
 
   // Session internals missing entirely must not crash the call.
   const orphan = await mountPlugin()
@@ -440,7 +518,7 @@ runtimeTest('P1-11: an underivable step falls back to an in-result audit line', 
 })
 
 // ---------------------------------------------------------------------------
-// P1-12 — warnOnce is per agent.
+// P1-12 / F5 — warnOnce is per Agent object.
 // ---------------------------------------------------------------------------
 
 test('P1-12: warnOnce keys include the agent identity', async () => {
@@ -465,6 +543,29 @@ test('P1-12: warnOnce keys include the agent identity', async () => {
   assert.equal(warnings.length, 2, 'each agent gets its own warning instead of one silencing the other')
   assert.ok(warnings[0].message.includes('warn-a'), 'the first warning names its agent')
   assert.ok(warnings[1].message.includes('warn-b'), 'the second warning names its agent')
+})
+
+test('F5: warnOnce distinguishes two Agents that share an id', async () => {
+  const fake = createFakeContext({
+    tools: createFakeToolsService([
+      {
+        name: 'mcp__srv__alpha',
+        description: 'fake MCP tool',
+        parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+      },
+    ]),
+    services: { agents: { list: () => [] } },
+  })
+  plugin.apply(fake.ctx, { manageServers: false })
+  await flushMicrotasks()
+
+  // Same id, two different Agent objects: a per-id key would let the first
+  // agent's warning silence the second one.
+  await fake.ctx.emit('agent/created', { agent: { id: 'reused-warn-id' } })
+  await fake.ctx.emit('agent/created', { agent: { id: 'reused-warn-id' } })
+
+  const warnings = fake.logs.filter((entry) => entry.level === 'warn')
+  assert.equal(warnings.length, 2, 'both agents warn even though they share an id')
 })
 
 // ---------------------------------------------------------------------------
