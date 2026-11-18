@@ -458,6 +458,10 @@ test('targetSummary never exposes argument values or an unparseable URL', () => 
   assert.equal(inline, 'mcp --token')
   assert.ok(!inline.includes('SYNTHETIC_SECRET'))
 
+  const attachedShort = targetSummary({ command: 'mysql', args: ['-pSYNTHETIC_SECRET', '-n'] }, 'stdio')
+  assert.equal(attachedShort, 'mysql -n')
+  assert.ok(!attachedShort.includes('SYNTHETIC_SECRET'))
+
   const validUrl = targetSummary({ url: 'https://alice:SYNTHETIC_SECRET@10.0.0.7:8443/private?token=SYNTHETIC_SECRET' }, 'streamable-http')
   assert.equal(validUrl, '10.0.0.7:8443')
   assert.ok(!validUrl.includes('SYNTHETIC_SECRET'))
