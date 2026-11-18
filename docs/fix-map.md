@@ -31,7 +31,7 @@ Test names are verbatim from the files; a test may cover several rows.
 
 | Item | Status | What changed (file · function) | Regression evidence (test file › test name) |
 |---|---|---|---|
-| S1 — management routes: no auth / origin / content-type check | Fixed | `lib/management.js` · `rejectUntrusted` (calls `connection.requestRejection`, `503` when the service or its fence is absent, fail-closed on throw), `requireMethod` (405 + `Allow`), `checkJsonContentType` (requires `application/json`, `415` for a missing or non-JSON header); `index.js` · management `ctx.inject([... 'connection'])` so the half does not activate without the fence | `test/management.test.mjs` › `every route answers a rejected admission with JSON before doing anything`; `a 401 rejection status is preserved in the JSON answer`; `a connection fence that throws fails closed`; `all three routes fail closed with 503 when the connection service is absent`; `POST routes refuse a declared non-JSON content type`; `a POST with a JSON body but no content-type header is a 415 with zero manager calls`; `methods are enforced with an allow header`; `test/core.test.mjs` › `management admission requires the Host connection service`; `scripts/live-boot.mjs` (default gate, real boot 9/9): `401`/`403` admission, `403` bad `Host`, `415` text/plain and missing content type, `405` + `Allow`, `400` bad body, `200` authenticated, patch layers byte-identical |
+| S1 — management routes: no auth / origin / content-type check | Fixed | `lib/management.js` · `rejectUntrusted` (calls `connection.requestRejection`, `503` when the service or its fence is absent, fail-closed on throw), `requireMethod` (405 + `Allow`), `checkJsonContentType` (requires `application/json`, `415` for a missing or non-JSON header); `index.js` · management `ctx.inject([... 'connection'])` so the half does not activate without the fence | `test/management.test.mjs` › `every route answers a rejected admission with JSON before doing anything`; `a 401 rejection status is preserved in the JSON answer`; `a connection fence that throws fails closed`; `all three routes fail closed with 503 when the connection service is absent`; `POST routes refuse a declared non-JSON content type`; `a POST with a JSON body but no content-type header is a 415 with zero manager calls`; `methods are enforced with an allow header`; `test/core.test.mjs` › `management admission requires the Host connection service`; `scripts/live-boot.mjs` (default gate, real boot 11/11 including the two live probes): `401`/`403` admission, `403` bad `Host`, `415` text/plain and missing content type, `405` + `Allow`, `400` bad body, `200` authenticated, patch layers byte-identical |
 | S2 — `enabled` missing/typed as non-boolean becomes "stop" | Fixed | `lib/management.js` · `validateBodyObject`, `validateAddressing`, `validateEnabled` run before lookup/enqueue; `readJsonBody` also rejects on a client disconnect (`close`/`aborted`, audit F8) instead of staying pending | `test/management.test.mjs` › `enabled must be a real boolean and bad bodies never enqueue work`; `F8: a client disconnect mid-body rejects the read and never reaches the manager`; `F8: readJsonBody rejects with an AbortError on a premature close`; `scripts/live-boot.mjs` probes `toggle-missing-enabled` / `toggle-enabled-string` → `400` |
 | S3 — hand-written YAML rewrite corrupts the patch | Fixed | `lib/patch.js` · `parsePatchDocument`, `lastOverride`, `flattenInsertRows`, `effectiveDisabled`, `snapshotOf`, `verifyRewrite`, `setPatchDisabled` (AST only; append verified top-level override for insert-only rows; a platform-valid BOM is stripped for the AST and re-emitted on write, audit F2) | `test/patch.test.mjs` › `setPatchDisabled keeps every reviewed fixture valid with the intended flag` (23 fixtures); `rewrites keep comments, CRLF line endings and block scalars`; `setPatchDisabled refuses text it cannot turn into a valid sequence`; `a row that only lives inside an insert group gets a top-level override`; `a BOM-prefixed patch is platform-valid and toggleable`; `a BOM-only patch behaves like an empty one`; `applyPatchOverride writes a top-level override for an insert-only home row`; `applyPatchOverride round-trips a BOM-prefixed file and keeps the prefix`; also `scripts/repro-review.mjs` probe A: `0/23` valid inputs turn unparseable |
 | S4 — file transaction: mode downgrade, weak backup, lost edits, non-atomic fallback | Fixed (process-local; cross-process lock deferred) | `lib/patch.js` · `resolveWritePath` (realpath; dangling symlink refused), `existingMode`, `writeAtomically` (`wx` + random suffix + `chmod` + `rename`), `backupPatchFile` (0600, throws), `writePatchFile` (CAS, 3 attempts), `applyPatchOverride` (re-reads inside the transaction) | `test/patch.test.mjs` › `backupPatchFile writes the snapshot next to the real file, mode 0600, and reports failure`; `writePatchFile defaults to 0600, preserves an existing mode and leaves no temp files`; `writePatchFile refuses to overwrite content it did not read`; `applyPatchOverride edits the current file, keeps 0600 and backs up the old bytes`; `two sequential edits on one file both survive`; `applyPatchOverride keeps a symlinked dotfile a symlink and backs up the real target`; `applyPatchOverride throws and leaves the original bytes when the result cannot be validated`; `applyPatchOverride fails visibly when the backup cannot be written`; `applyPatchOverride refuses a missing patch file` |
@@ -112,7 +112,7 @@ probes, migration verdict) is
 | L4 — render the detail without changing the vocabulary | Fixed | `client.js` · `liveOf`, `liveLabelOf` (reconnecting attempt/retry, waiting-credentials), `retryHintOf` (Host clock), `detailOf` (`statusDetail` first, `live` fallback; a connected/closed cell never explains a past error), `.dsh-mcp-card-detail`, tag `title` = label + detail | `test/client.test.mjs` › `a reconnecting starting row names the attempt and hints the retry`; `a starting row waiting for credentials says so`; `an error row shows the Host detail on the card and in the tag hint`; `an error row without a Host detail falls back to live.lastError`; `a detail that disappears between polls is removed cleanly`; `a running row without live data renders exactly as before`; `an older Host row without live/statusDetail fields still renders` |
 | L5 — keep the detail one bounded line | Fixed | `lib/management.js` · `DETAIL_ERROR_MAX_CHARS` (120) and `clip`; `LIVE_ERROR_MAX_CHARS` (240) in the payload | `test/management.test.mjs` › `the status detail clips a long lastError to one bounded line` (≤ 140 chars, no newline) |
 | L6 — read-only, no subscription, no write | Fixed | `lib/management.js` · `liveStatusOf` only calls `current()`; there is no `onChange` call anywhere and no write path is touched by a read | `test/management.test.mjs` › `reading live status never reaches a write path` (no `setPluginEnabled`, patch bytes unchanged); the live fixtures' `onChange` throws and the route test asserts it is never called |
-| L7 — capability and real-runtime evidence | Fixed | `scripts/probe-live-status.mjs` asserts `typeof entry.moduleNamespace.connectionStatusOf === 'function'` and a usable cell on a live row (non-zero exit when the seam is gone); `scripts/live-boot.mjs` boots two real MCP rows (broken command → `error`/`failed`, working local server → `running`/`connected` with the live tool count) | Release gates, not suite cases (see [test/README.md](../test/README.md) → *The gates*). The suite's fixture-level coverage of the same paths is L1–L6 above |
+| L7 — capability and real-runtime evidence | Fixed | `scripts/probe-live-status.mjs` (capability gate) asserts A–D against a real Cordis Loader and the installed `@deepseek-ai/dsh-mcp-client`: `typeof entry.moduleNamespace.connectionStatusOf === 'function'` on every MCP row and `liveStatusOf()` reads both; a broken command ends `failed`/`ENOENT`, presented as `error` with the spawn text in `statusDetail`; a real mini stdio server ends `connected` with `toolCount >= 2`, presented as `running` with no detail; `collectServerRows` creates no `onChange` subscription. `scripts/live-boot.mjs` (behavioural gate) declares `mcp-probe-broken` / `mcp-probe-ok` and probes `/state`: `state-live-broken` requires `status: error`, `live.state: failed` and `statusDetail` containing `ENOENT` (the row's `fiberPhase` is `active` — inference alone would have said `idle`); `state-live-connected` requires `status: running`, `live.state: connected`, `live.toolCount: 2` and `statusDetail: null` | `node scripts/probe-live-status.mjs` → 8/8 assertions `PASS` (`--json` carries the observed rows); `node scripts/live-boot.mjs` → `PASS (11/11)`, live rows settled in ≈65 ms. Both report a skip — never a pass — without the runtime (probe) or real Loader rows (`live-boot --expect baseline` / fallback). Suite-level fixture coverage of the same paths is L1–L6 above; commands and expected matrix in [test/README.md](../test/README.md) → *The gates* |
 
 Not changed in 1.3.0 (recorded, so a reviewer does not look for it):
 
@@ -181,25 +181,50 @@ $ node scripts/live-boot.mjs        # default --expect fixed, real boot
   ok  toggle-no-content-type   status=415  expected=415
   ok  state-wrong-method       status=405  expected=405
   ok  state-authenticated      status=200  expected=200
+  ok  state-live-broken        status=200  expected=200
+        row: status=error fiberPhase=active live={"state":"failed","reason":"gave-up","lastError":"Error: spawn /nonexistent/definitely-not-a-command ENOENT"} toolCount=0 statusDetail="failed: gave-up · Error: spawn /nonexistent/definitely-not-a-command ENOENT"
+  ok  state-live-connected     status=200  expected=200
+        row: status=running fiberPhase=active live={"state":"connected","toolCount":2,"connectedAt":<run ms>} toolCount=2 statusDetail=null
 
-  PASS  (1276 ms)
+  live rows settled: yes (waited 64 ms)
+
+  PASS  (11/11, 1530 ms)
 ```
 
 `live-boot` also snapshots both patch layers before and after the probes and fails unless
-they are byte-identical: every rejected probe changed nothing. For 1.3.0 it additionally boots
-two real MCP rows — one whose command cannot start, one working local MCP server — and requires
-the broken row to read `error` with `failed: …` detail while the working row reads `running`
-from the live cell; `scripts/probe-live-status.mjs` is the separate capability assertion (a DSH
-release that drops the seam fails it instead of silently degrading). Both are release gates,
-not suite cases.
+they are byte-identical: every rejected probe changed nothing. The two live probes assert the
+behaviour end to end: `state-live-broken` reads `error` / `live.state: failed` with the spawn
+error in `statusDetail` even though the row's `fiberPhase` is `active` (inference alone would
+have reported `idle`), and `state-live-connected` reads `running` / `connected` with
+`toolCount: 2` and no detail. `--expect baseline` and the no-runtime fallback report both live
+probes as `skip` — a skip is never counted as a pass.
+
+```
+$ node scripts/probe-live-status.mjs
+  PASS  A. entry.moduleNamespace.connectionStatusOf is a function
+  PASS  A. liveStatusOf reads both rows through the seam
+  PASS  D. collectServerRows creates no onChange subscription
+  PASS  D. collectServerRows keeps both live rows
+  PASS  B. broken row: live failed with the ENOENT diagnostic
+  PASS  B. broken row: status error and the spawn text in statusDetail
+  PASS  C. real row: live connected with toolCount >= 2
+  PASS  C. real row: status running with toolCount 2 and no detail
+```
+
+`probe-live-status` is the capability gate: it needs no HTTP stack, and it exits 0 only when
+all eight assertions pass. Without the DSH runtime it prints `SKIP: runtime unavailable` (with
+the missing packages) and exits 0, so a runtime-less checkout stays green; `--json` marks
+`skipped: true` and carries the observed rows. Both scripts are release gates, not suite cases.
 
 Gate semantics: `repro-review`'s default `--expect fixed` is the regression gate (exit 0 = no
 reviewed defect reproduces); `--expect baseline` is the historical 1.2.0 evidence mode and
 only passes on a `v1.2.0` checkout. `live-boot`'s default `--expect fixed` is the real-platform
-gate (real DSH boot, `node:http` so `Host` is sent, real cookie); `--expect baseline` only
-matches `v1.2.0`. The `repro-review` and `live-boot` gates were checked against the `v1.2.0`
-tag in both directions by the regression lane: on `v1.2.0` the baseline modes pass and the
-fixed modes fail, and on this release the reverse.
+behavioural gate (real DSH boot, `node:http` so `Host` is sent, real cookie, 11 probes); its
+`--expect baseline` only matches `v1.2.0` and reports the two live probes as `skip`, as does the
+no-runtime fallback — a skip never counts as a pass. `probe-live-status` is the capability gate
+(no HTTP stack) and has no baseline mode. The `repro-review` and `live-boot` gates were checked
+against the `v1.2.0` tag in both directions by the regression lane: on `v1.2.0` the baseline
+modes pass and the fixed modes fail, and on this release the reverse.
 
 ## Independent audits (2026-11-19)
 

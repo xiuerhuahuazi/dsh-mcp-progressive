@@ -37,12 +37,17 @@ Added:
   `title`), names the reconnect attempt on the tag, says "waiting for
   credentials", and discloses a failure's last error. Where the live cell is
   present, "connected, no tools" is shown only for `connected` with `toolCount: 0`.
-- `scripts/probe-live-status.mjs`, the seam's capability assertion: it exits
-  non-zero when a live row no longer exposes `connectionStatusOf` (or the read
-  returns no usable cell), so a DSH rename fails loudly instead of degrading to
-  inference silently. `scripts/live-boot.mjs` additionally boots two real MCP
-  rows — a broken command and a working local server — and requires `error` /
-  `failed` and `running` / `connected` respectively.
+- `scripts/probe-live-status.mjs`, the seam's capability gate (eight assertions,
+  A–D against a real Loader and the installed client): it exits non-zero when a
+  live row no longer exposes `connectionStatusOf`, when the broken row does not
+  present as `error` with the spawn text, or when the connected row does not
+  present as `running` with its live tool count — so a DSH rename fails loudly
+  instead of degrading to inference silently. `scripts/live-boot.mjs`
+  additionally boots two real MCP rows — `mcp-probe-broken` (a command that
+  cannot spawn) and `mcp-probe-ok` (a working local server) — and requires
+  `status: error` / `live.state: failed` with an `ENOENT` detail, and
+  `status: running` / `live.state: connected` with `toolCount: 2` and no detail
+  (`PASS (11/11)`).
 - `docs/architecture.md`: the plugin's seams, the mcp-manager migration verdict
   and its evidence, the do-not-do list, and the open product questions.
 

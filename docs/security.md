@@ -191,7 +191,7 @@ Reproduce with ephemeral state only: point `DSH_HOME` at a `mkdtemp` directory, 
 
 ## 7. Verification gates
 
-These scripts are release gates now; CI runs none of them (`npm test` is CI's gate).
+These three scripts are release gates now; CI runs none of them (`npm test` is CI's gate).
 
 ### 7.1 Real boot — `node scripts/live-boot.mjs` (default `--expect fixed`)
 
@@ -200,7 +200,7 @@ It creates a throw-away `DSH_HOME`, installs this package into a `test` profile,
 drives the routes with `node:http` (so an explicit `Host` really reaches the server),
 snapshots both patch layers before and after, and requires every probe to match.
 
-| Probe | Accepted | Observed (1.2.1; re-confirmed by the 1.3.0 `live-boot` gate) |
+| Probe | Accepted | Observed (HTTP matrix measured on 1.2.1, re-confirmed by the 1.3.0 gate; the live rows exist from 1.3.0) |
 |---|---|---|
 | `state-unauthenticated` | `401` or `403`, JSON refusal | `401` (no authenticated peer) |
 | `state-bad-host` | `403`, JSON refusal | `403` |
@@ -211,6 +211,8 @@ snapshots both patch layers before and after, and requires every probe to match.
 | `toggle-no-content-type` | `415` | `415` |
 | `state-wrong-method` (`POST /state`) | `405`, `Allow: GET, HEAD` | `405` |
 | `state-authenticated` | `200` | `200` |
+| `state-live-broken` (row `mcp-probe-broken`) | — (`skip`: 1.2.0 rows carry no `live` field) | `status: error`, `live.state: failed`, `statusDetail` contains `ENOENT`, row `fiberPhase: active` |
+| `state-live-connected` (row `mcp-probe-ok`) | — (`skip`) | `status: running`, `live.state: connected`, `live.toolCount: 2`, `statusDetail: null` |
 
 `state-unauthenticated` accepts either status because the platform may reject the request at
 the Host/Origin fence (`403`) or, once the Host is accepted, for the missing authenticated
@@ -221,10 +223,17 @@ body-less reset. The gate is a **rejection matrix**: it never performs a valid
 authenticated toggle, so it proves the admission/validation boundary rather than the
 write path; a valid toggle against the fake environment is covered by
 `scripts/repro-review.mjs` probe C, and the audit's own live valid-toggle probe confirmed
-the home-patch write path separately. `--expect baseline` documents the 1.2.0 matrix and
-only matches a v1.2.0 checkout. Without the unpacked runtime the script falls back to an in-process HTTP server
-behind a stub fence and reports `mode: fallback-http`, `platformAuthority: false` — the
-handler contract, not the platform wiring.
+the home-patch write path separately. The 1.3.0 boot also declares two real MCP loader rows —
+`mcp-probe-broken` (a command that cannot spawn) and `mcp-probe-ok` (a minimal stdio MCP server
+written into the temp home, exposing two tools) — waits until both rows publish a settled live
+state (≈65 ms; `live rows settled: yes`) and asserts `state-live-broken` / `state-live-connected`
+as in the table above; the broken row is `fiberPhase: active` while its live state is `failed`,
+which is exactly why inference alone would have said "idle". On this tree the gate is
+`PASS (11/11)`. `--expect baseline` documents the 1.2.0 matrix and only matches a v1.2.0
+checkout; it reports the two live probes as `skip`, and a skip is never a pass. Without the
+unpacked runtime the script falls back to an in-process HTTP server behind a stub fence and
+reports `mode: fallback-http`, `platformAuthority: false`; the live probes are skipped there too
+(no real Loader row) — the handler contract, not the platform wiring.
 
 ### 7.2 Repro gate — `node scripts/repro-review.mjs` (default `--expect fixed`)
 
@@ -242,7 +251,27 @@ The `repro-review` and `live-boot` gates were checked against the `v1.2.0` tag i
 directions: on `v1.2.0` the baseline modes pass and the fixed modes fail, and on this release
 the reverse.
 
-### 7.3 Fixture note
+### 7.3 Capability gate — `node scripts/probe-live-status.mjs`
+
+The live-status read depends on an undocumented Loader shape. This gate asserts the capability
+itself, without the HTTP stack, against a real Cordis `Context`, the real Loader and the
+installed `@deepseek-ai/dsh-mcp-client` (two rows in a `mkdtemp` home: a broken command and a
+minimal stdio MCP server exposing two tools):
+
+| Assertion | What must hold |
+|---|---|
+| A | `typeof entry.moduleNamespace.connectionStatusOf === 'function'` on every MCP row, and the plugin's `liveStatusOf()` reads both rows |
+| B | The broken row ends `failed` with `ENOENT` in `lastError`, presented as `status: error` with the spawn text in `statusDetail` |
+| C | The real row ends `connected` with `toolCount >= 2`, presented as `status: running` with no detail |
+| D | `collectServerRows` creates no `onChange` subscription (public `onChange` instrumented before the read; the client's private observer set checked when readable) |
+
+It exits 0 only when all eight assertions pass. Without the DSH runtime it prints
+`SKIP: runtime unavailable` (plus the missing packages) and exits 0, so a runtime-less checkout
+stays green — `--json` marks `skipped: true` and carries the checks and the observed rows. A
+skip is never a pass; the script exists so a DSH release that moves the seam fails loudly
+instead of quietly degrading to the inference.
+
+### 7.4 Fixture note
 
 The real-runtime smoke fixture that previously lacked a Host `connection` service is fixed in
 `02fe061`: `mountPlugin()` now provides it (and `mountPlugin({ connection: false })` models a
@@ -252,7 +281,7 @@ local copy of the review catalog, which makes it 187 pass / 0 skip), and on CI �
 no catalog — it is 187 tests, 166 pass / 21 skip / 0 fail. The 1.3.0 live-status cases run in
 every posture: their fixtures need no DSH runtime.
 
-### 7.4 Independent audits (2026-11-19)
+### 7.5 Independent audits (2026-11-19)
 
 Two adversarial audits of this candidate (`audit-security.md`, `audit-core-docs.md`) shaped
 the final code:
@@ -275,8 +304,9 @@ the final code:
 
 Final postures on this tree: `npm test` 187 tests — 184 pass / 3 skip / 0 fail locally,
 187 pass / 0 skip with `MCP_REVIEW_CATALOG`, 166 pass / 21 skip / 0 fail on a runtime-less
-CI; `node scripts/repro-review.mjs` PASS `0/6`; `node scripts/live-boot.mjs` PASS `9/9`
-(real boot; plus the 1.3.0 two-row live probes).
+CI; `node scripts/repro-review.mjs` PASS `0/6`; `node scripts/live-boot.mjs` PASS `11/11`
+(real boot, including `state-live-broken` / `state-live-connected`); `node
+scripts/probe-live-status.mjs` PASS (8/8 assertions, `live-status-seam`).
 
 ## 8. Residual risks / deferred
 

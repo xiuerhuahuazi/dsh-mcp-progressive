@@ -7,8 +7,8 @@ Five artefacts live here:
 | `test/harness.mjs` | the shared harness (runtime loader, fake plugin context, management environment, fake browser) | imported, not a test |
 | `test/smoke.test.mjs` | the regression suite (`node:test` + `node:assert/strict`) | yes |
 | `scripts/repro-review.mjs` | review-defect regression gate (default); historical 1.2.0 evidence with `--expect baseline` | no (release gate; its YAML family needs the runtime) |
-| `scripts/live-boot.mjs` | end-to-end HTTP gate against a real DSH web instance (default `--expect fixed`), including two real MCP rows for the live-status seam as of 1.3.0 | no (it boots a server) |
-| `scripts/probe-live-status.mjs` | capability assertion for the Loader-entry live-status seam (1.3.0): fails when DSH stops exposing it | no (it boots a server) |
+| `scripts/live-boot.mjs` | real-platform behavioural gate: 9 HTTP probes plus, as of 1.3.0, `state-live-broken` / `state-live-connected` against two real MCP loader rows (11/11 in `--expect fixed`) | no (it boots a server) |
+| `scripts/probe-live-status.mjs` | capability gate for the Loader-entry live-status seam (1.3.0): assertions A–D against a real Loader; fails when DSH stops exposing the seam | no (real Loader in a temp dir; no server) |
 
 ## How to run
 
@@ -24,7 +24,8 @@ node scripts/live-boot.mjs           # real-boot gate; --expect fixed is the def
 node scripts/live-boot.mjs --json    # the same, machine readable
 node scripts/live-boot.mjs --expect baseline      # historical 1.2.0 matrix; only passes on a v1.2.0 checkout
 
-node scripts/probe-live-status.mjs   # capability assertion: exit 0 only while the live-status seam exists
+node scripts/probe-live-status.mjs   # capability gate: exit 0 only when every A–D assertion passes
+node scripts/probe-live-status.mjs --json   # assertions + observed rows, machine readable
 ```
 
 The three real-catalog schema cases are optional and private: point
@@ -36,10 +37,11 @@ The three real-catalog schema cases are optional and private: point
 | unpacked runtime present, `MCP_REVIEW_CATALOG` set | 187 tests, 187 pass / 0 skip / 0 fail |
 | CI: no runtime, no catalog | 187 tests, 166 pass / 21 skip / 0 fail |
 
-`npm test` is the gate CI runs. The three scripts are release gates run locally: one needs
-the unpacked DSH runtime for its YAML family, the others boot a real server, so none belongs in
-the fast hermetic suite. The 1.3.0 live-status cases are suite cases and run in every posture —
-their fixtures need no runtime.
+`npm test` is the gate CI runs. The three scripts are release gates run locally: `repro-review`
+needs the unpacked DSH runtime for its YAML family, `live-boot` boots a real server, and
+`probe-live-status` needs the runtime and a real Loader (no HTTP), so none belongs in the fast
+hermetic suite. The 1.3.0 live-status cases are suite cases and run in every posture — their
+fixtures need no runtime.
 
 ## The gates
 
@@ -71,7 +73,7 @@ browser session cookie from the launch token, drives the routes with `node:http`
 explicit `Host` header really reaches the server), snapshots both patch layers before and
 after, and requires every probe plus the byte-identical patch layers to hold.
 
-Expected statuses:
+Expected statuses (11 probes in `--expect fixed`):
 
 | Probe | `--expect baseline` | `--expect fixed` |
 | --- | --- | --- |
@@ -84,6 +86,8 @@ Expected statuses:
 | `POST /toggle`, no `content-type` header | 404 | 415 |
 | `POST /state` (wrong method) | 200 | 405, `Allow: GET, HEAD` |
 | `GET /state`, authenticated same-origin | 200 | 200 |
+| `state-live-broken` (row `mcp-probe-broken`) | `skip` | row `status: error`, `live.state: failed`, `statusDetail` contains `ENOENT` |
+| `state-live-connected` (row `mcp-probe-ok`) | `skip` | row `status: running`, `live.state: connected`, `live.toolCount >= 2`, `statusDetail: null` |
 
 `state-unauthenticated` accepts either status because the platform may reject at the
 Host/Origin fence (`403`) or, once the Host is accepted, for the missing authenticated peer
@@ -92,10 +96,19 @@ body, not a reset. `--expect baseline` only matches a `v1.2.0` checkout. `repro-
 `live-boot` were checked against the `v1.2.0` tag in both directions: on `v1.2.0` the baseline
 modes pass and the fixed modes fail, and on this release the reverse.
 
-As of 1.3.0 the same boot also installs **two real MCP rows** — one whose command cannot start
-and one working local MCP server — and requires the broken row to report `error` with a
-`failed: …` detail and the working row to report `running` from the live cell (with the live tool
-count). That exercises the Loader-entry seam against a real client, not only against fixtures.
+As of 1.3.0 the throw-away profile also declares **two real MCP loader rows** —
+`mcp-probe-broken` (a command that cannot spawn) and `mcp-probe-ok` (a minimal stdio MCP server
+written into the temp home, exposing two tools). The gate waits until both rows publish a settled
+live state (≈65 ms here; `live rows settled: yes`) and then asserts them through `/state`:
+`state-live-broken` requires `status: "error"`, `live.state: "failed"` and a `statusDetail`
+carrying the spawn error **even though the row's `fiberPhase` is `active`** (inference alone would
+have called it `idle`), and `state-live-connected` requires `status: "running"`,
+`live.state: "connected"`, `live.toolCount: 2` and `statusDetail: null`. That exercises the
+Loader-entry seam against a real client, not only against fixtures; on this tree the gate is
+`PASS (11/11)`. `--expect baseline` reports the two live probes as `skip` (a 1.2.0 row carries no
+live status), and the fallback mode skips them too because it has no real Loader row — a skip is
+never counted as a pass. `--json` carries each probe's `row`/`skipped`, plus the top-level
+`liveWait` (the row-settling wait).
 
 If the DSH runtime is not installed the script falls back to a minimal real HTTP server that
 mounts the plugin's own route handlers and says so in its result: `"mode": "fallback-http"`,
@@ -107,11 +120,24 @@ contract behind a stub fence, not the platform wiring.
 The plugin reads a row's live status from the running client through
 `entry.moduleNamespace.connectionStatusOf(...)`, guarded so that a missing seam falls back to the
 1.2.1 inference. That fallback is the right user-facing behaviour and the wrong release
-behaviour, so this script is its counterpart: on a booted instance with a real MCP row it asserts
-that the namespace exposes `connectionStatusOf` as a function and that the read returns a usable
-status cell, and exits non-zero otherwise. It is the "DSH renamed the seam" alarm — run it on
-every DSH upgrade, not only on plugin releases. Like `live-boot` it boots an isolated instance,
-so it is a release gate rather than a suite case.
+behaviour, so this script is its counterpart. It runs a real Cordis `Context`, the real Loader and
+the installed `@deepseek-ai/dsh-mcp-client` over two rows (a broken command and a real mini stdio
+MCP server) inside a `mkdtemp` home, and asserts:
+
+* **A** — `typeof entry.moduleNamespace.connectionStatusOf === 'function'` on every MCP row, and
+  the plugin's `liveStatusOf()` reads both rows;
+* **B** — the broken row ends `failed` with `ENOENT` in `lastError`, and `liveStatusView` /
+  `presentServer` turn it into `status: error` with the spawn text in `statusDetail`;
+* **C** — the real row ends `connected` with `toolCount >= 2`, presented as `status: running`
+  with `toolCount: 2` and no detail;
+* **D** — `collectServerRows` creates no `onChange` subscription (the public `onChange` is
+  instrumented before the read, and the client's own observer set is checked when readable).
+
+All eight assertions must pass for exit 0. Without the DSH runtime the script prints
+`SKIP: runtime unavailable` (plus the missing packages) and exits 0, so a runtime-less checkout
+stays green — the skip is explicit and `--json` marks `skipped: true`; a skip is never a quiet
+pass. It is the "DSH renamed the seam" alarm: run it on every DSH upgrade, not only on plugin
+releases.
 
 ## What the suite covers
 
@@ -210,8 +236,10 @@ CI has no DSH runtime, so:
   21 skip. The live-status cases are not skipped anywhere: their live fixtures are pure JS.
 * `scripts/repro-review.mjs` is not part of `npm test`; its YAML family also skips when the
   DSH runtime is absent, and the script is a release gate, not a suite case.
-* `scripts/live-boot.mjs` and `scripts/probe-live-status.mjs` are not part of `npm test` — they
-  boot a server, and `node --test` must stay fast and hermetic.
+* `scripts/live-boot.mjs` and `scripts/probe-live-status.mjs` are not part of `npm test` — one
+  boots a server and both need the unpacked runtime/real Loader, so they stay release gates.
+  Without the runtime, `live-boot` falls back and reports its two live probes as `skip`, and
+  `probe-live-status` prints `SKIP: runtime unavailable` and exits 0; a skip is never a pass.
 * the control-queue *timeout* case uses `withVirtualClock()`, which advances `Date.now()` by
   a fixed step per call: the plugin's fixed `SERVER_WAIT_MS = 30000` deadline is then
   reached in ~0.6 s of real time. It is in the suite (it asserts a `500`, not a timing), but
@@ -220,10 +248,11 @@ CI has no DSH runtime, so:
 ## Hermeticity
 
 * temp directories only (`os.tmpdir()`), always removed afterwards;
-* `~/.dsh` is never read or written: `scripts/live-boot.mjs` and `scripts/probe-live-status.mjs`
-  boot the real app with `DSH_HOME` pointed at a throw-away `mkdtemp` home;
-* no user MCP server is ever started: the 1.3.0 live-status boot starts only its own throw-away
-  local server in an isolated home, and the user's real servers are untouched;
+* `~/.dsh` is never read or written: `scripts/live-boot.mjs` boots the real app with `DSH_HOME`
+  pointed at a throw-away `mkdtemp` home, and `scripts/probe-live-status.mjs` runs the real
+  Loader in the same kind of temp home (a temp `node_modules` symlink resolves the row name);
+* no user MCP server is ever started: the 1.3.0 scripts start only their own throw-away mini
+  stdio MCP server inside the temp home, and the user's real servers are untouched;
 * no fixed port: the live boot asks the OS for a free one (`--port 0`) and reads the port
   back from the URL the app prints.
 
@@ -235,4 +264,6 @@ CI has no DSH runtime, so:
 `dsh --profile test --port <free> --no-open` as a child process, mints the browser session
 cookie from the launch token the app prints, drives the routes over real HTTP, snapshots
 both patch layers, then kills the child, shuts the listener down and removes the home. The
-expected matrix is in *The gates* above.
+temp profile patch declares the two probe rows (`mcp-probe-broken`, `mcp-probe-ok`), and the
+inline mini MCP server for the second is written into the temp home. The expected matrix is in
+*The gates* above.

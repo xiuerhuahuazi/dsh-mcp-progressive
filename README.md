@@ -324,29 +324,43 @@ Everything runs locally with no network and no access to `~/.dsh`:
   1.2.0 evidence mode: it passes only on a `v1.2.0` checkout (6/6 reproduced) and otherwise
   reports `NOT A 1.2.0 CHECKOUT`. Without the DSH runtime the YAML family is reported as
   `skip`, never as a pass.
-- `node scripts/live-boot.mjs` — the real-platform end-to-end gate (default `--expect fixed`).
-  It boots a throw-away real DSH web instance (`DSH_HOME` in a temp directory, OS-assigned
-  port) with the package installed, mints the browser session cookie and drives the routes
-  with `node:http`, so an explicit `Host` header really reaches the server. It accepts
+- `node scripts/live-boot.mjs` — the real-platform **behavioural gate** (default `--expect fixed`,
+  **11/11 probes**). It boots a throw-away real DSH web instance (`DSH_HOME` in a temp directory,
+  OS-assigned port) with the package installed, mints the browser session cookie and drives the
+  routes with `node:http`, so an explicit `Host` header really reaches the server. It accepts
   `401|403` for the unauthenticated probe and asserts `403` for a bad `Host`, `415` for
-  `text/plain` and for a missing content type, `405` + `Allow` for the wrong method, `400` for
-  a bad body and `200` authenticated — and that both patch layers are byte-identical
-  afterwards: `PASS (9/9)`. For 1.3.0 it also boots two real MCP rows — one with a command that
-  cannot start, one working local MCP server — and requires the broken row to read `error`
-  (`detail: failed: …`) and the working row to read `running` from the live cell (with the
-  live tool count), which exercises the seam end to end instead of only through fixtures.
-  `--expect baseline` documents the 1.2.0 matrix and only matches a `v1.2.0` checkout. Without
-  the unpacked runtime it falls back to an in-process HTTP server behind a stub fence and
-  reports `mode: fallback-http`, `platformAuthority: false`.
-- `node scripts/probe-live-status.mjs` — the seam's **capability assertion** (1.3.0). It checks,
-  on a live MCP row, that `entry.moduleNamespace.connectionStatusOf` is a function and that the
-  read returns a usable status cell, and exits non-zero when it is not. That is deliberate: the
-  plugin's guarded fallback keeps working when DSH renames or removes the seam, but a silent
-  downgrade to inference should be a red gate here rather than a surprise in the panel.
+  `text/plain` and for a missing content type, `405` + `Allow` for the wrong method, `400` for a
+  bad body and `200` authenticated — and that both patch layers are byte-identical afterwards.
+  The throw-away profile also declares two real MCP loader rows — `mcp-probe-broken` (a command
+  that cannot spawn) and `mcp-probe-ok` (a minimal stdio MCP server written into the temp home,
+  exposing two tools) — and the gate adds `state-live-broken`, which requires `status: "error"`,
+  `live.state: "failed"` and a `statusDetail` carrying the spawn error even though the row's
+  `fiberPhase` is `active` (inference alone would have called it `idle`), and
+  `state-live-connected`, which requires `status: "running"`, `live.state: "connected"`,
+  `live.toolCount: 2` and `statusDetail: null`; both rows settle in ≈65 ms (`live rows settled:
+  yes`). Result on this tree: `PASS (11/11)`. `--expect baseline` documents the 1.2.0 matrix and
+  only matches a `v1.2.0` checkout; it reports the two live probes as `skip`, and a skip is never
+  counted as a pass. Without the unpacked runtime the gate falls back to an in-process HTTP
+  server behind a stub fence (`mode: fallback-http`, `platformAuthority: false`) and the live
+  probes are skipped there too — there is no real Loader row to assert.
+- `node scripts/probe-live-status.mjs` — the seam's **capability gate** (1.3.0), independent of
+  the HTTP stack so a panel or admission regression cannot hide a seam regression. Against a real
+  Cordis Loader and the installed `@deepseek-ai/dsh-mcp-client` it asserts (A)
+  `typeof entry.moduleNamespace.connectionStatusOf === 'function'` on every MCP row and that the
+  plugin's `liveStatusOf()` reads both rows; (B) a row whose command cannot spawn ends `failed`
+  with `ENOENT` in `lastError`, presented as `error` with the spawn text in `statusDetail`; (C) a
+  row running a minimal stdio MCP server ends `connected` with `toolCount ≥ 2`, presented as
+  `running` with no detail; (D) `collectServerRows` creates no `onChange` subscription. It exits
+  0 only when every assertion passes; without the DSH runtime it prints `SKIP: runtime
+  unavailable` (and which packages are missing) and exits 0, so a runtime-less checkout stays
+  green — `--json` marks `skipped: true`. Run it on every DSH upgrade: the plugin's guarded
+  fallback keeps working when the seam moves, but this gate turns that silent downgrade into a
+  red line.
 
-The `repro-review` and `live-boot` gates were checked against the `v1.2.0` tag in both directions
-by the regression lane: on `v1.2.0` the baseline modes pass and the fixed modes fail, and on this
-release the reverse.
+The `repro-review` and `live-boot` fixed/baseline modes were checked against the `v1.2.0` tag in
+both directions by the regression lane: on `v1.2.0` the baseline modes pass and the fixed modes
+fail, and on this release the reverse. `probe-live-status` is a capability gate, not a
+regression matrix, so it has no baseline mode.
 
 The tests use three worlds: the real DSH runtime (real Cordis, real `dsh-tools`), a fake plugin
 context for the HTTP routes, and a fake browser for `client.js`. The review-item → fix → test
@@ -655,23 +669,35 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
   `--expect baseline` 是历史的 1.2.0 证据模式：只有在 `v1.2.0` 检出上才通过（6/6 复现），
   否则报告 `NOT A 1.2.0 CHECKOUT`。没有 DSH 运行时的情况下 YAML 那组报告为 `skip`，绝不当作
   通过。
-- `node scripts/live-boot.mjs`——真实平台的端到端门（默认 `--expect fixed`）。它用临时
-  `DSH_HOME` 和操作系统分配的端口启动一个真实 DSH Web 实例并安装本包，从启动令牌换取浏览器
-  cookie，再用 `node:http` 探测路由（因此显式 `Host` 真的会到达服务器）。未认证探针接受
+- `node scripts/live-boot.mjs`——真实平台的**行为门**（默认 `--expect fixed`，**11/11 个探针**）。
+  它用临时 `DSH_HOME` 和操作系统分配的端口启动一个真实 DSH Web 实例并安装本包，从启动令牌换取
+  浏览器 cookie，再用 `node:http` 探测路由（因此显式 `Host` 真的会到达服务器）。未认证探针接受
   `401|403`，并断言坏 `Host` → `403`、`text/plain` 与缺少 content-type → `415`、错误方法 →
-  `405` 带 `Allow`、坏 body → `400`、已认证 → `200`，且事后两层补丁文件逐字节不变：
-  `PASS (9/9)`。1.3.0 还额外启动两条真实 MCP 行——一条命令启动不起来、一条是可用的本地 MCP
-  服务器——要求坏行读作 `error`（详情 `failed: …`）、好行从实时单元读作 `running`（工具数取自
-  实时 generation），从而端到端跑通这条缝，而不只是在夹具里验证。`--expect baseline` 记录
-  1.2.0 矩阵，只在 `v1.2.0` 检出上成立。没有解包运行时则退回进程内 HTTP 服务器 + 桩围栏，
-  并报告 `mode: fallback-http`、`platformAuthority: false`。
-- `node scripts/probe-live-status.mjs`——这条缝的**能力断言**（1.3.0）。它在一条真实 MCP 行上
-  检查 `entry.moduleNamespace.connectionStatusOf` 是函数、且读取返回可用的状态单元，不满足时以
-  非零退出。这是有意的：插件带守卫的回落保证了 DSH 改名/移除该缝时功能仍能降级运行，但「静默
-  降级成推断」应该在这里亮红灯，而不是在面板上给使用者一个惊喜。
+  `405` 带 `Allow`、坏 body → `400`、已认证 → `200`，且事后两层补丁文件逐字节不变。临时 profile
+  还声明两条真实 MCP loader 行——`mcp-probe-broken`（一条无法 spawn 的命令）与
+  `mcp-probe-ok`（写进临时 home 的最小 stdio MCP 服务器，暴露两个工具）——门里因此多出
+  `state-live-broken`：要求该行 `status: "error"`、`live.state: "failed"`，且 `statusDetail`
+  带上 spawn 错误，即使它的 `fiberPhase` 是 `active`（只靠推断会把它当成 `idle`）；以及
+  `state-live-connected`：要求 `status: "running"`、`live.state: "connected"`、
+  `live.toolCount: 2`、`statusDetail: null`。两行都在 ≈65 ms 内稳定（`live rows settled:
+  yes`）。本检出结果：`PASS (11/11)`。`--expect baseline` 记录 1.2.0 矩阵，只在 `v1.2.0`
+  检出上成立；它把这两个实时探针报告为 `skip`，而 skip 绝不算通过。没有解包运行时则退回进程内
+  HTTP 服务器 + 桩围栏（`mode: fallback-http`、`platformAuthority: false`），实时探针同样跳过——
+  没有真实 Loader 行可供断言。
+- `node scripts/probe-live-status.mjs`——这条缝的**能力门**（1.3.0），不依赖 HTTP 栈，因此面板或
+  准入的回归藏不住缝本身的回归。它对着真实 Cordis Loader 与已安装的
+  `@deepseek-ai/dsh-mcp-client` 断言：(A) 每条 MCP 行上
+  `typeof entry.moduleNamespace.connectionStatusOf === 'function'`，且插件的 `liveStatusOf()`
+  能读到两行；(B) 命令无法 spawn 的行最终为 `failed`、`lastError` 带 `ENOENT`，呈现为 `error`
+  且 `statusDetail` 含 spawn 文本；(C) 运行最小 stdio MCP 服务器的行最终为 `connected`、
+  `toolCount ≥ 2`，呈现为 `running` 且无详情；(D) `collectServerRows` 不创建任何 `onChange`
+  订阅。只有全部断言通过才 exit 0；没有 DSH 运行时则打印 `SKIP: runtime unavailable`（并列出缺失
+  的包）且 exit 0，让无运行时的检出保持绿色，`--json` 会标记 `skipped: true`。每次升级 DSH 都该跑它：
+  插件带守卫的回落会让缝被移动时功能继续降级运行，而这个门把「静默降级」变成红线。
 
-回归线已用 `v1.2.0` 标签双向核对 `repro-review` 与 `live-boot` 这两个门：在 `v1.2.0` 上
-baseline 模式通过、fixed 模式失败；在本版本上相反。
+回归线已用 `v1.2.0` 标签双向核对 `repro-review` 与 `live-boot` 的 fixed/baseline 模式：在
+`v1.2.0` 上 baseline 模式通过、fixed 模式失败；在本版本上相反。`probe-live-status` 是能力断言
+而不是回归矩阵，因此没有 baseline 模式。
 
 测试使用三个世界：真实 DSH 运行时（真实 Cordis、真实 `dsh-tools`）、用于 HTTP 路由的假插件
 上下文、以及驱动 `client.js` 的假浏览器。评审条目 → 修复 → 测试的对应表在
