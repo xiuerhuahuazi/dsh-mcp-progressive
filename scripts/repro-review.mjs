@@ -21,7 +21,10 @@
  * schema fitting), the gate also requires that outcome, so a partial
  * regression cannot hide behind "not reproduced". A family that cannot be
  * verified without the DSH runtime is reported as `skip` with its reason
- * instead of silently passing.
+ * instead of silently passing; a run that skipped a family can still exit 0
+ * (CI has no runtime) but it is not the full regression gate, so the verdict
+ * line counts the skips (`PASS (5/6 evaluated, 1 skipped — skips are not
+ * evidence)`) and `--json` carries `skipsNotEvidence: true` / `authority: false`.
  *
  * `--expect baseline` keeps the original behaviour: exit 0 when all six
  * families ARE reproduced. It only matches a v1.2.0 checkout — on a repaired
@@ -694,6 +697,10 @@ const result = {
   skipped,
   total: entries.length,
   pass,
+  // A skip is printed and counted, never silently promoted to a pass; a
+  // verdict that needed one is not the full six-family regression gate.
+  skipsNotEvidence: skipped > 0,
+  authority: pass === true && skipped === 0,
   families: Object.fromEntries(entries.map((entry) => [entry.key, entry.verdict])),
   probes,
 }
@@ -740,12 +747,13 @@ if (wantJson) {
           : 'INVALID JSON'
         : 'no schema printed'
   console.log(`  F  full schema       ${probes.fullSchema.schemaChars} chars -> ${schemaOutcome}`)
-  console.log(`\n  ${reproduced}/${entries.length} defect families reproduced (${entries.length - skipped} evaluated, ${skipped} skipped)`)
+  const skipNote = skipped > 0 ? `, ${skipped} skipped — skips are not evidence` : ''
+  console.log(`\n  ${reproduced}/${entries.length} defect families reproduced (${entries.length - skipped}/${entries.length} evaluated${skipNote})`)
 
   if (pass && expectation === 'fixed') {
-    console.log('  PASS — no reviewed defect reproduces (regression gate)\n')
+    console.log(`  PASS — no reviewed defect reproduces (${entries.length - skipped}/${entries.length} evaluated${skipNote}) (regression gate)\n`)
   } else if (pass) {
-    console.log('  PASS — every reviewed 1.2.0 defect reproduces (this checkout is 1.2.0)\n')
+    console.log(`  PASS — every reviewed 1.2.0 defect reproduces (${entries.length - skipped}/${entries.length} evaluated${skipNote}) (this checkout is 1.2.0)\n`)
   } else if (expectation === 'fixed') {
     console.log(`  REGRESSION: ${failures.map((entry) => entry.key).join(', ')}\n`)
   } else if (failures.length > 0) {
