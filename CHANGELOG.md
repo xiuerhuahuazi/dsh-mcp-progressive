@@ -4,6 +4,60 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-11-19
+
+Distribution: 1.4.0 is distributed from GitHub as the tag/release (`v1.4.0`);
+the release notes record the pinned commit for an immutable install. The npm
+registry still serves 1.2.0 (later releases were not published there), so
+install the git spec from README → Install — the tag, or the pinned commit. The
+npm `dsh-mcp-progressive@1.4.0` path will be added once it is published there.
+
+Fixed:
+
+- Panel start-safety valve (audit R1): while a row's Host status is `starting`
+  and its live cell does not prove the transport settled (`connecting`,
+  `reconnecting`, `waiting-credentials`, or no live cell — anything but a live
+  `closed`), the MCP servers panel disables **Stop** and **Restart** and puts
+  the reason in each control's `title` / `aria-label`
+  (`Wait for the server to finish starting before stopping or restarting it`;
+  Chinese `启动完成后再停止或重启`). A Stop/Restart landing in that window can
+  dispose a stdio transport whose version-negotiation sibling has not spawned;
+  upstream then signals pid 0, i.e. the caller's whole process group
+  (`@modelcontextprotocol/client` `StdioClientTransport._dispose()`). This is a
+  UI-level mitigation for the user-driven case, not a platform fix.
+- The disabled controls carry a no-POST guard in their click handlers, so an
+  activation that still reaches one never writes to the routes.
+- A live `closed` cell is excluded because that transport has settled: the row
+  stays controllable (the escape hatch for a start that hangs). The guard never
+  disables the Start action of a `stopped` row and never changes a request body.
+- Tests (`test/client.test.mjs`, 8 new):
+  `a starting row disables stop and restart and explains why`,
+  `the starting hazard hint is localized`,
+  `reconnecting and waiting-credentials starting rows are blocked too`,
+  `a closed transport is not a spawn hazard, so the row stays controllable`,
+  `a starting row without live data falls back to the hazard lock`,
+  `running, idle, error and stopped rows keep their controls enabled`,
+  `a stopped row is still startable`,
+  `a pending action still disables every control`.
+
+Changed:
+
+- Version 1.4.0. README (both halves), `docs/fix-map.md`, `docs/security.md`,
+  `docs/architecture.md` and `test/README.md` describe the guard and its escape
+  hatch, the remaining paths to the disposal, and the refreshed postures
+  (199 tests: 196 pass / 3 skip; 199/0 with the review catalog; 178 pass /
+  21 skip without the runtime).
+
+Known residual:
+
+- R1 is a platform/upstream issue and is **not fixed**. The panel guard covers
+  only the user-driven Stop/Restart; a loader-driven reload/uninstall, a
+  programmatic toggle (`mcp_server` is not guarded) and the Host's own disposal
+  can still reach `_dispose()` mid-spawn, so the SIGTERM-to-process-group path
+  remains. The end-to-end DSH shutdown through it is **UNVERIFIED**. An upstream
+  report is drafted in the 2026-11-19 review workspace and is **not filed** and
+  has no URL yet; no fix is claimed. See `docs/security.md` → residual risks.
+
 ## [1.3.0] - 2026-11-19
 
 Distribution: 1.3.0 is published on 2026-11-19 as a GitHub tag/release (`v1.3.0`).

@@ -1,4 +1,4 @@
-# Security contract — management half (1.2.1 → 1.3.0)
+# Security contract — management half (1.2.1 → 1.4.0)
 
 This note records what the MCP server management half (`lib/management.js`, `client.js`)
 promises, and the raw evidence behind it. It is written from the code and from a real,
@@ -7,7 +7,9 @@ isolated DSH boot; anything not verified is marked as such.
 The disclosure half (`index.js`) exposes no network surface. Its trust boundary is
 described in `README.md` → Limitations (hiding is view + dispatch, not a permission
 boundary). 1.3.0 adds one read of the running MCP client's status cell; it opens no new
-surface and no write path (§3.1).
+surface and no write path (§3.1). 1.4.0 adds no route, permission or write either: its only
+change is a browser-side guard that disables Stop/Restart while a row may still be spawning
+(§8, R1).
 
 ## 1. What listens
 
@@ -228,7 +230,7 @@ write path; a valid toggle against the fake environment is covered by
 the home-patch write path separately. The 1.3.0 boot also declares two real MCP loader rows —
 `mcp-probe-broken` (a command that cannot spawn) and `mcp-probe-ok` (a minimal stdio MCP server
 written into the temp home, exposing two tools) — waits until both rows publish a settled live
-state (≈65 ms; `live rows settled: yes`) and asserts `state-live-broken` / `state-live-connected`
+state (≈70 ms; `live rows settled: yes`) and asserts `state-live-broken` / `state-live-connected`
 as in the table above; the broken row is `fiberPhase: active` while its live state is `failed`,
 which is exactly why inference alone would have said "idle". On this tree the gate is
 `PASS (11/11)`. `--expect baseline` documents the 1.2.0 matrix and only matches a v1.2.0
@@ -289,11 +291,12 @@ degrading to the inference.
 
 The real-runtime smoke fixture that previously lacked a Host `connection` service is fixed in
 `02fe061`: `mountPlugin()` now provides it (and `mountPlugin({ connection: false })` models a
-host without it). With the runtime present `npm test` is 191 tests, 188 pass / 3 skip /
+host without it). With the runtime present `npm test` is 199 tests, 196 pass / 3 skip /
 0 fail (the three optional real-catalog cases skip unless `MCP_REVIEW_CATALOG` points at a
-local copy of the review catalog, which makes it 191 pass / 0 skip), and on CI — no runtime,
-no catalog — it is 191 tests, 170 pass / 21 skip / 0 fail. The 1.3.0 live-status cases run in
-every posture: their fixtures need no DSH runtime.
+local copy of the review catalog, which makes it 199 pass / 0 skip), and without the runtime
+(`DSH_RUNTIME=/nonexistent`, what CI has) it is 199 tests, 178 pass / 21 skip / 0 fail. The
+1.3.0 live-status and 1.4.0 hazard cases run in every posture: their fixtures need no DSH
+runtime.
 
 ### 7.5 Independent 1.2.1 audits (2026-11-19)
 
@@ -316,12 +319,12 @@ the final code:
   Agent/SystemPrompt seams are still stubbed) and F7 is recorded as the live-boot gate's
   coverage boundary in §7.1.
 
-Final postures on this tree: `npm test` 191 tests — 188 pass / 3 skip / 0 fail locally,
-191 pass / 0 skip with `MCP_REVIEW_CATALOG`, 170 pass / 21 skip / 0 fail on a runtime-less
-CI; `node scripts/repro-review.mjs` PASS — no reviewed defect reproduces (6/6 evaluated);
-`node scripts/live-boot.mjs` PASS `(11/11)` (real boot, including `state-live-broken` /
-`state-live-connected`); `node scripts/probe-live-status.mjs` PASS (8/8 assertions,
-`live-status-seam`).
+Final postures on this tree: `npm test` 199 tests — 196 pass / 3 skip / 0 fail locally,
+199 pass / 0 skip with `MCP_REVIEW_CATALOG`, 178 pass / 21 skip / 0 fail under
+`DSH_RUNTIME=/nonexistent` (the CI posture); `node scripts/repro-review.mjs` PASS — no
+reviewed defect reproduces (6/6 evaluated); `node scripts/live-boot.mjs` PASS `(11/11)` (real
+boot, including `state-live-broken` / `state-live-connected`, live rows settled in ≈70 ms);
+`node scripts/probe-live-status.mjs` PASS (8/8 assertions, `live-status-seam`).
 
 ## 8. Residual risks / deferred
 
@@ -342,12 +345,20 @@ CI; `node scripts/repro-review.mjs` PASS — no reviewed defect reproduces (6/6 
 - R1 (upstream, pre-existing, found by the 1.3 review): `@modelcontextprotocol/client`'s
   `StdioClientTransport._dispose()` can call `proc.kill("SIGTERM")` on a transport whose spawn
   has not completed; a `ChildProcess` with no pid forwards that to pid 0, the caller's process
-  group. The capability gate now quiesces before disposing (and records rather than dies by a
-  signal), but the plugin's own Stop/Restart is platform-owned, so stopping a row while it is
-  still starting can in principle signal the Host's process group and trigger its graceful
-  shutdown. The signal delivery is observed through the gate's failure path; the end-to-end app
-  impact is **unverified**. It is identical in 1.2.1 and not introduced by this plugin; report
-  upstream and treat it as a known hazard until fixed.
+  group. The capability gate quiesces before disposing (and records rather than dies by a
+  signal). 1.4.0 adds a panel-side start-safety valve: while a row's Host status is `starting`
+  and its live cell is not `closed` — i.e. `connecting`, `reconnecting`, `waiting-credentials`,
+  or no live cell at all — the panel disables **Stop** and **Restart**, states the reason in
+  each control's `title` / `aria-label`, and the disabled control's handler does not POST. A
+  live `closed` cell is excluded because it proves the transport already settled (the escape
+  hatch), and the guard never disables the Start action of a `stopped` row. This mitigates the
+  **user-driven** case only: the disposal path itself is unchanged and platform-owned, so a
+  loader-driven reload/uninstall, a programmatic toggle (`mcp_server` is not guarded) or the
+  Host's own disposal can still reach it. The signal delivery is observed through the gate's
+  failure path; the end-to-end DSH shutdown is **unverified**. It is identical in 1.2.1 and not
+  introduced by this plugin. An upstream report is drafted in the 2026-11-19 review workspace
+  (path not published) and is **not filed**; no fix is claimed. Treat it as a known hazard until
+  the SDK is fixed.
 - Deletion of `.mcp-hub.bak`/temporary files is not managed: the backup is rewritten in
   place, and a crash mid-rename can leave a random-suffix temporary (never a truncated
   target, because the rename is atomic).
@@ -372,4 +383,4 @@ with `MCP_REVIEW_CATALOG` 187 / 0; `DSH_RUNTIME=/nonexistent` 166 / 21; `repro-r
 | F6 — the panel could add a live-derived failure detail to a row the Host reports as `stopped` | Info | Fixed: the client's live fallback is gated on `starting`/`error`/`running`/`idle`; a Host `statusDetail` still renders on any status; tests `a stopped or stopping row does not inherit a stale live failure detail`, `a stopped row still shows the statusDetail the Host sent`. |
 | F7 — `package-lock.json` still recorded 1.2.0 | Info | Non-issue: the lock is untracked and gitignored; it is not in the tarball and `npm test` does not read it. |
 | F8 — "120 in `statusDetail`" described the `lastError` segment, not the whole line | Info | Fixed in the docs: the `lastError` segment is clipped to 120 chars and the whole one-line detail is bounded by the reason prefix too (observed max ≈177). |
-| R1 — upstream SDK `StdioClientTransport._dispose()` can signal the caller's process group when disposing mid-spawn | High impact, pre-existing | Documented residual (§8), not fixed here: the gate quiesces, the plugin's Stop/Restart is platform-owned, end-to-end app impact unverified, identical in 1.2.1. |
+| R1 — upstream SDK `StdioClientTransport._dispose()` can signal the caller's process group when disposing mid-spawn | High impact, pre-existing | Documented residual (§8); 1.4.0 mitigates the user-driven panel case only — the gate quiesces, the disposal itself is platform-owned, other callers still reach it, end-to-end app impact unverified, identical in 1.2.1. |

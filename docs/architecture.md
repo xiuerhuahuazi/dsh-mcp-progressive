@@ -1,7 +1,7 @@
-# Architecture — where this plugin plugs in (1.3.0)
+# Architecture — where this plugin plugs in (1.4.0)
 
 The seams this plugin uses, why each exists, and the ones it deliberately does not use. Written
-from the 1.3.0 code and the running Host (DSH 0.2.2-rc.3); the memo behind it is
+from the 1.4.0 code and the running Host (DSH 0.2.2-rc.3); the memo behind it is
 `dsh-mcp-progressive-review/2026-11-19/arch-1.3-investigation.md`.
 
 ## 1. Disclosure: a per-agent scope restriction
@@ -78,9 +78,15 @@ writable declaration is `409`. Every operation re-reads live state inside one se
 and answers what actually happened (`applied` / `restart-required` / `overridden` / observed
 status / rollback).
 
+1.4.0 adds no server-side seam: the panel's start-safety valve (`client.js` · `spawnHazard`) only
+disables **Stop/Restart** while a row's status is `starting` and its live cell is not `closed`
+(audit R1). It is a **UI mitigation only** — the disposal that can signal the caller's process
+group belongs to `@deepseek-ai/dsh-mcp-client` / `@modelcontextprotocol/client`, so the routes,
+the `mcp_server` tool and a loader-driven reload/uninstall are unchanged and can still reach it.
+
 ## 5. mcp-manager migration verdict
 
-**Not in 1.3.0.** The official `mcpManager` service is present in this deployment and its
+**Not in 1.3.0 or 1.4.0.** The official `mcpManager` service is present in this deployment and its
 `list()`/`watch()`/`restart()` are real capabilities, but moving the server definitions is a
 configuration-ownership change, not a bug fix:
 

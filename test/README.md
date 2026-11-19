@@ -14,7 +14,7 @@ Five artefacts live here:
 
 ```sh
 npm install --no-audit --no-fund     # once; the only dependency is `yaml`
-npm test                             # the suite (191 tests; CI's gate)
+npm test                             # the suite (199 tests; CI's gate)
 
 node scripts/repro-review.mjs        # review-defect gate: exit 0 = no reviewed defect reproduces
 node scripts/repro-review.mjs --json # the same, machine readable
@@ -33,15 +33,15 @@ The three real-catalog schema cases are optional and private: point
 
 | Posture | `npm test` |
 | --- | --- |
-| unpacked runtime present, `MCP_REVIEW_CATALOG` unset (default local) | 191 tests, 188 pass / 3 skip / 0 fail |
-| unpacked runtime present, `MCP_REVIEW_CATALOG` set | 191 tests, 191 pass / 0 skip / 0 fail |
-| CI: no runtime, no catalog | 191 tests, 170 pass / 21 skip / 0 fail |
+| unpacked runtime present, `MCP_REVIEW_CATALOG` unset (default local) | 199 tests, 196 pass / 3 skip / 0 fail |
+| unpacked runtime present, `MCP_REVIEW_CATALOG` set | 199 tests, 199 pass / 0 skip / 0 fail |
+| no runtime, no catalog (`DSH_RUNTIME=/nonexistent`, the CI posture) | 199 tests, 178 pass / 21 skip / 0 fail |
 
 `npm test` is the gate CI runs. The three scripts are release gates run locally: `repro-review`
 needs the unpacked DSH runtime for its YAML family, `live-boot` boots a real server, and
 `probe-live-status` needs the runtime and a real Loader (no HTTP), so none belongs in the fast
-hermetic suite. The 1.3.0 live-status cases are suite cases and run in every posture — their
-fixtures need no runtime.
+hermetic suite. The 1.3.0 live-status cases and the 1.4.0 hazard cases are suite cases and run
+in every posture — their fixtures need no runtime.
 
 ## The gates
 
@@ -101,7 +101,7 @@ modes pass and the fixed modes fail, and on this release the reverse.
 As of 1.3.0 the throw-away profile also declares **two real MCP loader rows** —
 `mcp-probe-broken` (a command that cannot spawn) and `mcp-probe-ok` (a minimal stdio MCP server
 written into the temp home, exposing two tools). The gate waits until both rows publish a settled
-live state (≈65 ms here; `live rows settled: yes`) and then asserts them through `/state`:
+live state (≈70 ms here; `live rows settled: yes`) and then asserts them through `/state`:
 `state-live-broken` requires `status: "error"`, `live.state: "failed"` and a `statusDetail`
 carrying the spawn error **even though the row's `fiberPhase` is `active`** (inference alone would
 have called it `idle`), and `state-live-connected` requires `status: "running"`,
@@ -209,6 +209,23 @@ skip is **not evidence**, and `--json` marks `skipped: true` / `authority: false
     stopped/stopping row free of a stale live failure detail while a Host `statusDetail` still
     renders (`a stopped or stopping row does not inherit a stale live failure detail`, `a
     stopped row still shows the statusDetail the Host sent`).
+* **start-safety valve (1.4.0)**, in `test/client.test.mjs`: while a row's Host status is
+  `starting` and its live cell does not prove the transport settled (`connecting`, `reconnecting`,
+  `waiting-credentials`, or no live cell — anything but `closed`), the panel disables **Stop** and
+  **Restart** and puts a localized reason in each control's `title`/`aria-label`
+  (`hazard.starting`: `Wait for the server to finish starting before stopping or restarting it` /
+  `启动完成后再停止或重启`), and an activation that still reaches a disabled control performs no
+  POST. A live `closed` cell is the escape hatch and stays controllable; a `stopped` row's Start is
+  never disabled by the guard; a pending action still disables every control; a `starting` row
+  without live data falls back to the lock. Tests:
+  `a starting row disables stop and restart and explains why`;
+  `the starting hazard hint is localized`;
+  `reconnecting and waiting-credentials starting rows are blocked too`;
+  `a closed transport is not a spawn hazard, so the row stays controllable`;
+  `a starting row without live data falls back to the hazard lock`;
+  `running, idle, error and stopped rows keep their controls enabled`;
+  `a stopped row is still startable`;
+  `a pending action still disables every control`.
 
 ## The three worlds in `test/harness.mjs`
 
@@ -249,10 +266,10 @@ CI has no DSH runtime, so:
 
 * 18 runtime-dependent cases call `t.skip()` when `hasRuntime()` is false, and the 3
   real-catalog schema cases skip unless `MCP_REVIEW_CATALOG` names a local copy of the
-  private review catalog. Locally with the runtime present that is 188 pass / 3 skip
-  (191 pass / 0 skip with the variable set); on CI, which has neither, it is 170 pass /
-  21 skip. The live-status and audit-fix cases are not skipped anywhere: their fixtures are
-  pure JS.
+  private review catalog. Locally with the runtime present that is 196 pass / 3 skip
+  (199 pass / 0 skip with the variable set); without the runtime, which is the CI posture,
+  it is 178 pass / 21 skip. The live-status, audit-fix and 1.4.0 hazard cases are not skipped
+  anywhere: their fixtures are pure JS.
 * `scripts/repro-review.mjs` is not part of `npm test`; its YAML family also skips when the
   DSH runtime is absent, and the script is a release gate, not a suite case.
 * `scripts/live-boot.mjs` and `scripts/probe-live-status.mjs` are not part of `npm test` — one

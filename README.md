@@ -101,7 +101,16 @@ disconnected entirely (its child process exits) without unloading this plugin:
   detail for a row that is still `starting`/`error`/`running`/`idle`: a `stopped`/`stopping` row
   renders a Host `statusDetail` if one was sent, but never inherits a stale live failure. Where
   the live cell is available, "connected, no tools" is now reported only for `connected` with
-  `toolCount: 0`. The list
+  `toolCount: 0`. While a row presents as `starting` — the `connecting` / `reconnecting` /
+  `waiting-credentials` live states, or `starting` with no live cell at all — the panel disables
+  its **Stop** and **Restart** controls and puts the reason in their `title` / `aria-label`
+  (`Wait for the server to finish starting before stopping or restarting it`; Chinese
+  `启动完成后再停止或重启`): stopping or restarting a transport inside its version-negotiation
+  spawn window can dispose it mid-spawn and signal the Host's own process group (see
+  Limitations). A live `closed` cell proves the transport already settled, so that row stays
+  controllable — the escape hatch for a start that hangs. The guard only reads the Host status
+  and the live cell: it never disables the Start action of a `stopped` row, never changes a
+  request body, and a click that still reaches a blocked control does not POST. The list
   reuses the built-in Plugins page card design (48px icon tile, 14px card title, 13px
   description, status tag, 36×20 switch) and DSH theme tokens only, so it matches the host in
   light and dark themes. It polls the same-origin routes; no client RPC surface is added.
@@ -213,26 +222,26 @@ Requires DeepSeek Harness `>=0.2.2-rc.1 <0.3.0-0` (0.2.2 moved tool declarations
 declares one runtime dependency, `yaml` (`^2.9.1`), used for the patch rewrite; the bundle
 installation installs it.
 
-**1.3.0 lives on GitHub, not on npm yet.** The npm registry still serves only
-`dsh-mcp-progressive@1.2.0`, which predates 1.2.1 and 1.3.0, so installing
-`dsh-mcp-progressive@1.3.0` from npm fails until that release is published there. Install from
-the `v1.3.0` GitHub tag:
+**1.4.0 lives on GitHub, not on npm yet.** The npm registry still serves only
+`dsh-mcp-progressive@1.2.0`, which predates 1.2.1, 1.3.0 and 1.4.0, so installing
+`dsh-mcp-progressive@1.4.0` from npm fails until that release is published there. Install from
+the `v1.4.0` GitHub tag:
 
 ```
-plugin_manager → action: "install_bundle", target: "github:xiuerhuahuazi/dsh-mcp-progressive#v1.3.0"
+plugin_manager → action: "install_bundle", target: "github:xiuerhuahuazi/dsh-mcp-progressive#v1.4.0"
 ```
 
 or **Settings → Plugins → install bundle** with the same spec. The tag points at the release
-commit recorded in the v1.3.0 release notes; when you need an immutable target, pin that sha
+commit recorded in the v1.4.0 release notes; when you need an immutable target, pin that sha
 instead of the tag (the DSH docs recommend a pinned digest over a moving branch). The bundle
 inserts the row `mcp-progressive`; no other bundle is required.
 
-Upgrading from the npm `dsh-mcp-progressive@1.2.0` (or 1.0.0), or from a 1.2.1 git install:
-remove the old installed package/bundle first, then install the git spec above; restart the
-Harness app once so the client half and package metadata are picked up, then refresh the page. A
-fresh install shows the **MCP servers** tab on first start.
+Upgrading from the npm `dsh-mcp-progressive@1.2.0` (or 1.0.0), or from a 1.2.1 / 1.3.0 git
+install: remove the old installed package/bundle first, then install the git spec above; restart
+the Harness app once so the client half and package metadata are picked up, then refresh the
+page. A fresh install shows the **MCP servers** tab on first start.
 
-Once 1.3.0 is published to npm, plain `dsh-mcp-progressive@1.3.0` will work too; this section
+Once 1.4.0 is published to npm, plain `dsh-mcp-progressive@1.4.0` will work too; this section
 will say so at that point.
 
 ### Configuration
@@ -313,13 +322,14 @@ What follows from the formula:
 
 Everything runs locally with no network and no access to `~/.dsh`:
 
-- `npm test` — the suite in `test/` (`node --test`), **191** tests. With the unpacked DSH
+- `npm test` — the suite in `test/` (`node --test`), **199** tests. With the unpacked DSH
   runtime present (`$DSH_RUNTIME`, default `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`) it
-  is 188 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
-  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 191 pass
-  / 0 skip; the catalog is private and not committed). On CI (`.github/workflows/test.yml`,
-  Node 22 and 24) neither the runtime nor that catalog exists, so the 18 runtime-dependent and
-  the 3 real-catalog cases skip: 170 pass / 21 skip / 0 fail.
+  is 196 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
+  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 199 pass
+  / 0 skip; the catalog is private and not committed). Without the unpacked runtime
+  (`DSH_RUNTIME=/nonexistent`, what CI has — `.github/workflows/test.yml`, Node 22 and 24,
+  neither runtime nor catalog) the 18 runtime-dependent and the 3 real-catalog cases skip:
+  178 pass / 21 skip / 0 fail.
 - `node scripts/repro-review.mjs` — the review-defect **regression gate** (default
   `--expect fixed`). It replays the six defect families from the 2026-11-19 review and exits 0
   only when none of them reproduces; otherwise it prints `REGRESSION: <families>` and exits 1.
@@ -345,7 +355,7 @@ Everything runs locally with no network and no access to `~/.dsh`:
   `live.state: "failed"` and a `statusDetail` carrying the spawn error even though the row's
   `fiberPhase` is `active` (inference alone would have called it `idle`), and
   `state-live-connected`, which requires `status: "running"`, `live.state: "connected"`,
-  `live.toolCount: 2` and `statusDetail: null`; both rows settle in ≈65 ms (`live rows settled:
+  `live.toolCount: 2` and `statusDetail: null`; both rows settle in ≈70 ms (`live rows settled:
   yes`). Result on this tree: `PASS (11/11)`. `--expect baseline` documents the 1.2.0 matrix and
   only matches a `v1.2.0` checkout; it reports the two live probes as `skip`. A skip is printed
   and counted separately: a run that needed one exits 0 where CI/fallback require it, but its
@@ -399,10 +409,15 @@ mapping is in [docs/fix-map.md](docs/fix-map.md).
 - An upstream SDK behaviour can signal the caller's process group: `@modelcontextprotocol/client`'s
   `StdioClientTransport._dispose()` may call `proc.kill("SIGTERM")` on a transport whose spawn has
   not completed, and a `ChildProcess` with no pid forwards that to pid 0. It is pre-existing
-  (identical in 1.2.1), not introduced by this plugin; the capability gate now quiesces before
-  disposing, but the plugin's own Stop/Restart is platform-owned. Observed through the gate's
-  failure path; the end-to-end app impact is **unverified**, and Stop/Restart on a row that is
-  still starting should be treated as a known hazard until the SDK is fixed.
+  (identical in 1.2.1) and not introduced by this plugin. 1.4.0's panel blocks the **user-driven**
+  Stop/Restart while a row is in that window (status `starting`, live cell not `closed`; the
+  disabled control never POSTs), but that is a UI mitigation only: the disposal itself is
+  unchanged and platform-owned, so a loader-driven reload/uninstall, a programmatic toggle
+  (`mcp_server` is not guarded) or the Host's own disposal can still reach it. The signal was
+  observed through the capability gate's failure path (that gate now quiesces before disposing);
+  the end-to-end DSH shutdown is **UNVERIFIED**. An upstream report is drafted in the 2026-11-19
+  review workspace and is **not filed** — no URL and no fix are claimed. See
+  [docs/security.md](docs/security.md) → residual risks (audit R1).
 - Live status depends on a seam that DSH does not document as a plugin contract: when the Host
   does not expose `Entry.moduleNamespace.connectionStatusOf` (or the read throws), the plugin
   falls back silently to the 1.2.1 inference from loader rows, diagnostics and registered tool
@@ -410,8 +425,8 @@ mapping is in [docs/fix-map.md](docs/fix-map.md).
   until it is restarted. The 1.3.0 panel and `mcp_servers` are correct wherever the seam exists
   (DSH 0.2.2-rc.3 verified); `scripts/probe-live-status.mjs` is the loud check for a DSH release
   that moves it.
-- The mcp-manager migration is **not** in 1.3.0. The official service exists and would still feed
-  disclosure (it registers `mcp__*` tools), but it composes 0 servers here, owns only
+- The mcp-manager migration is **not** in 1.3.0 or 1.4.0. The official service exists and would
+  still feed disclosure (it registers `mcp__*` tools), but it composes 0 servers here, owns only
   `Config.servers`, cannot see home-patch rows, and its writes would be refused for values a home
   patch overrides; migrating would also require moving the definitions and offering no official
   CRUD route. See [docs/architecture.md](docs/architecture.md) for the verdict and the
@@ -429,8 +444,8 @@ mapping is in [docs/fix-map.md](docs/fix-map.md).
   a raw call in PTC mode and answers with guidance to `mcp_load` and call the tool inside
   `run_code`.
 - The catalog is read from the global registry view only: MCP tools mounted by an agent preset
-  or an agent scope are neither hidden nor searchable by `mcp_search` (a 1.4 candidate; the
-  disclosure restriction does not see them).
+  or an agent scope are neither hidden nor searchable by `mcp_search` (an open candidate —
+  1.4.0 did not take it; the disclosure restriction does not see them).
 - Non-MCP tools are never touched.
 
 ### License
@@ -518,6 +533,14 @@ id 的 agent 不会共享同一份遮蔽。Harness 重启即重置。`eagerTools
   第二行不会丢信息。客户端只为仍在 `starting`/`error`/`running`/`idle` 的行重建实时详情：
   `stopped`/`stopping` 的行若 Host 给了 `statusDetail` 就照常显示，但绝不继承过期的实时失败。
   有实时单元时，只有它报告 `connected` 且 `toolCount: 0` 才显示「已连接（无工具）」。
+  当一行呈现为 `starting`——实时状态是 `connecting` / `reconnecting` / `waiting-credentials`，
+  或者根本没有实时单元——面板会禁用它的**停止**与**重启**控件，并把原因写进控件的
+  `title` / `aria-label`（`启动完成后再停止或重启`；英文
+  `Wait for the server to finish starting before stopping or restarting it`）：在 spawn /
+  版本协商窗口内停止或重启，可能在 transport 尚未 spawn 完成时把它 dispose 掉，进而把
+  SIGTERM 发给 Host 自己的进程组（见「限制」）。实时单元是 `closed` 的行说明 transport 已经
+  稳定，保持可操作——这是启动卡住时的逃生口。守卫只读 Host 状态与实时单元：它不会禁用
+  `stopped` 行的启动动作，不改变任何请求体，即使点击落到被禁用的控件上也不会发出 POST。
   卡片沿用插件页既有设计（48px 图标、14px 卡片标题、13px 描述、状态标签、
   36×20 开关）且只用 DSH 主题 token，明暗主题都与宿主一致；数据来自同源路由，不新增客户端 RPC。
 - **模型工具**：`mcp_servers` 列出所有已配置服务器及状态，并附同一行实时详情；
@@ -609,23 +632,23 @@ Host、group/builtin 行、缺少 fiber 句柄或读取抛错时一律得到 `nu
 `system-prompt/assemble` 瀑布，这正是旧版本无法运行本版本的原因）。插件声明唯一的运行时依赖
 `yaml`（`^2.9.1`），用于补丁改写；安装 bundle 时会一并安装。
 
-**1.3.0 目前只在 GitHub 上，还没发布到 npm。** npm registry 上仍然只有
-`dsh-mcp-progressive@1.2.0`（早于 1.2.1 与 1.3.0），所以用 npm spec
-`dsh-mcp-progressive@1.3.0` 会失败，直到该版本正式发布到 npm。请从 `v1.3.0` 的 GitHub tag 安装：
+**1.4.0 目前只在 GitHub 上，还没发布到 npm。** npm registry 上仍然只有
+`dsh-mcp-progressive@1.2.0`（早于 1.2.1、1.3.0 与 1.4.0），所以 npm spec
+`dsh-mcp-progressive@1.4.0` 会失败，直到该版本正式发布到 npm。请从 `v1.4.0` 的 GitHub tag 安装：
 
 ```
-plugin_manager → action: "install_bundle", target: "github:xiuerhuahuazi/dsh-mcp-progressive#v1.3.0"
+plugin_manager → action: "install_bundle", target: "github:xiuerhuahuazi/dsh-mcp-progressive#v1.4.0"
 ```
 
-或在**设置 → 插件 → 安装 bundle** 中填入同一个 spec。该 tag 指向 v1.3.0 release notes 里记录的
+或在**设置 → 插件 → 安装 bundle** 中填入同一个 spec。该 tag 指向 v1.4.0 release notes 里记录的
 发布 commit；需要不可变目标时，钉住那个 sha，而不是 tag（DSH 文档建议钉 sha，而不是跟随会移动的
 分支）。该 bundle 会插入 `mcp-progressive` 行，不依赖其他 bundle。
 
-从 npm 的 `dsh-mcp-progressive@1.2.0`（或 1.0.0）、或从 1.2.1 的 git 安装升级：先移除旧的已安装
-包/bundle，再安装上面的 git spec；**重启一次 Harness 应用**让客户端半侧与包元数据生效，然后刷新
-页面；全新安装首次启动即可看到「MCP 服务器」标签页。
+从 npm 的 `dsh-mcp-progressive@1.2.0`（或 1.0.0）、或从 1.2.1 / 1.3.0 的 git 安装升级：先移除旧的
+已安装包/bundle，再安装上面的 git spec；**重启一次 Harness 应用**让客户端半侧与包元数据生效，
+然后刷新页面；全新安装首次启动即可看到「MCP 服务器」标签页。
 
-等 1.3.0 发布到 npm 之后，直接 `dsh-mcp-progressive@1.3.0` 也会可用；届时本节会更新。
+等 1.4.0 发布到 npm 之后，直接 `dsh-mcp-progressive@1.4.0` 也会可用；届时本节会更新。
 
 ### 配置
 
@@ -679,12 +702,13 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
 
 全部本地运行，不联网、不读写 `~/.dsh`：
 
-- `npm test`——`test/` 下的测试（`node --test`），共 **191** 个。在 `$DSH_RUNTIME`（默认
-  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 188 通过 / 3 跳过 /
+- `npm test`——`test/` 下的测试（`node --test`），共 **199** 个。在 `$DSH_RUNTIME`（默认
+  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 196 通过 / 3 跳过 /
   0 失败：三个「真实目录」schema 用例只有把 `MCP_REVIEW_CATALOG` 指向评审用 210 工具目录的
-  本地副本时才运行（此时 191 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。CI
-  （`.github/workflows/test.yml`，Node 22 与 24）既没有解包运行时、也没有该目录，于是 18 个
-  依赖运行时的用例 + 3 个真实目录用例跳过：170 通过 / 21 跳过 / 0 失败。
+  本地副本时才运行（此时 199 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。在没有解包运行时
+  的情况下（`DSH_RUNTIME=/nonexistent`，也就是 CI 的姿态——`.github/workflows/test.yml`，
+  Node 22 与 24，既没有运行时也没有该目录），18 个依赖运行时的用例 + 3 个真实目录用例跳过：
+  178 通过 / 21 跳过 / 0 失败。
 - `node scripts/repro-review.mjs`——评审缺陷**回归门**（默认 `--expect fixed`）。它把
   2026-11-19 评审的六组缺陷在当前代码上重放，只有一组都不复现时才 exit 0；否则打印
   `REGRESSION: <families>` 并 exit 1。凡是能观察到「修好后的结果」的组（准入、控制队列、
@@ -704,7 +728,7 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
   `state-live-broken`：要求该行 `status: "error"`、`live.state: "failed"`，且 `statusDetail`
   带上 spawn 错误，即使它的 `fiberPhase` 是 `active`（只靠推断会把它当成 `idle`）；以及
   `state-live-connected`：要求 `status: "running"`、`live.state: "connected"`、
-  `live.toolCount: 2`、`statusDetail: null`。两行都在 ≈65 ms 内稳定（`live rows settled:
+  `live.toolCount: 2`、`statusDetail: null`。两行都在 ≈70 ms 内稳定（`live rows settled:
   yes`）。本检出结果：`PASS (11/11)`。`--expect baseline` 记录 1.2.0 矩阵，只在 `v1.2.0`
   检出上成立；它把这两个实时探针报告为 `skip`。skip 会单独打印并计数：需要 skip 的运行在
   CI/fallback 要求下仍 exit 0，但它的结论不是权威门——fallback 打印
@@ -751,16 +775,21 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
 - 上游 SDK 有一种会把信号发给调用方进程组的行为：`@modelcontextprotocol/client` 的
   `StdioClientTransport._dispose()` 可能在 transport 的 spawn 尚未完成时调用
   `proc.kill("SIGTERM")`，而没有 pid 的 `ChildProcess` 会把它转发给 pid 0。它是既有问题
-  （1.2.1 同样存在），不是本插件引入的；能力门现在会先 quiesce 再 dispose，但插件自己的
-  停止/重启由平台拥有。该信号在能力门的失败路径上被观察到，端到端对应用的影响**未验证**；
-  在 SDK 修复前，对仍在启动中的行执行停止/重启应视为已知风险。
+  （1.2.1 同样存在），不是本插件引入的。1.4.0 的面板现在拦住了**用户点按钮**触发的停止/重启
+  （行状态为 `starting` 且实时单元不是 `closed`；被禁用的控件不会发出 POST），但这只是 UI 层
+  的缓解：disposal 本身没有改变、仍由平台拥有，所以 Loader 驱动的重载/卸载、程序化开关
+  （`mcp_server` 未加守卫）或 Host 自己的 disposal 仍可能走到那条路径。该信号在能力门的失败
+  路径上被观察到（能力门现在会先 quiesce 再 dispose）；端到端是否会关掉整个 DSH **未验证**。
+  上游报告已在 2026-11-19 评审工作区起草，**尚未提交**——不声称有 URL，也不声称已修复。见
+  [docs/security.md](docs/security.md) → 残余风险（audit R1）。
 - 实时状态依赖一条 DSH 未文档化为插件契约的缝：当 Host 不提供
   `Entry.moduleNamespace.connectionStatusOf`（或读取抛错）时，插件静默回落到 1.2.1 的推断
   （loader 行、诊断与已注册工具名）；此时已启用但重连预算耗尽的服务器可能显示为「已连接（无工具）」，
   直到重启。凡有该缝的地方（DSH 0.2.2-rc.3 已验证），1.3.0 的面板与 `mcp_servers` 都正确；
   `scripts/probe-live-status.mjs` 是 DSH 移动该缝时的响铃检查。
-- mcp-manager 迁移**不在** 1.3.0 内。官方服务存在、迁过去披露也仍然有效（它照样把 `mcp__*` 注册进
-  `ctx.tools`），但它在当前部署里管着 0 台服务器、只拥有 `Config.servers`、看不见 home 补丁里的行，
+- mcp-manager 迁移**不在** 1.3.0 或 1.4.0 内。官方服务存在、迁过去披露也仍然有效（它照样把
+  `mcp__*` 注册进 `ctx.tools`），但它在当前部署里管着 0 台服务器、只拥有 `Config.servers`、
+  看不见 home 补丁里的行，
   且被 home 补丁覆盖的值会让它的写入被拒；迁移还要搬定义、且官方没有 CRUD 路由。裁决与前置条件见
   [docs/architecture.md](docs/architecture.md)。
 - `/dsh-mcp-hub/*` 的信任门来自 Host 的 `connection` 服务，管理半侧也只在该服务存在时激活；若一次
@@ -772,7 +801,7 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
   已装载工具都覆盖；`mcp_call` 在 PTC 模式下不能直接分发，会提示改用 `mcp_load` 后在
   `run_code` 内调用。
 - 目录只读取全局注册表视图：由 agent preset 或 agent 作用域挂载的 MCP 工具既不会被隐藏，也搜不到
-  （1.4 候选；披露 restriction 看不到它们）。
+  （仍是待做候选，1.4.0 未纳入；披露 restriction 看不到它们）。
 - 非 MCP 工具不受影响。
 
 ### 许可证

@@ -1,8 +1,9 @@
-# Fix map — 1.2.0 review → 1.2.1, and 1.3.0 live status
+# Fix map — 1.2.0 review → 1.2.1, 1.3.0 live status, 1.4.0 start-safety valve
 
 Audit trail for the 2026-11-19 review (`SYNTHESIS.md` §3/§4/§5) and for the 1.3.0
-live-status change. Every row names the code that changed and the regression that locks it.
-Test names are verbatim from the files; a test may cover several rows.
+live-status and 1.4.0 start-safety-valve changes. Every row names the code that changed and
+the regression that locks it. Test names are verbatim from the files; a test may cover
+several rows.
 
 **Status legend**
 
@@ -77,7 +78,7 @@ Test names are verbatim from the files; a test may cover several rows.
 | P2-5 — PTC detection relies on `/run_code/` text | Partially fixed | `index.js` · detection now covers the result path as well as a thrown message (`ptcRefusalGuidance`), but it is still a text match, not an error code | `test/core.test.mjs` › `P1-10: a PTC refusal returned as a result yields the guidance string` |
 | P2-6 — `oneLine` budgets UTF-16 units, not tokens | Not changed | `lib/search.js` · `oneLine` still clips by string length; `summaryChars` is a character budget (24–600) | Code read; no behaviour regression claimed |
 | P2-7 — two concurrent `mcp_call`s of one tool | Moot | `index.js` · `mcp_load` / `mcp_call` do not declare `isConcurrencySafe`, so the platform pipeline runs them exclusively per agent; only `mcp_search` returns `true` | Code read (`index.js` tool definitions) + review §8.9 |
-| P2-8 — `catalogOf()` sees only the global registry view | Not changed (documented, core audit F8) | `index.js` · `catalogOf` still reads `ctx.tools.schemas()` (global); agent/preset-scope-mounted MCP tools are neither hidden nor searchable. Recorded in `README.md` → Limitations as a 1.4 candidate (1.3.0 did not take it) | Code read; `README.md` → Limitations |
+| P2-8 — `catalogOf()` sees only the global registry view | Not changed (documented, core audit F8) | `index.js` · `catalogOf` still reads `ctx.tools.schemas()` (global); agent/preset-scope-mounted MCP tools are neither hidden nor searchable. Recorded in `README.md` → Limitations as an open candidate (neither 1.3.0 nor 1.4.0 took it) | Code read; `README.md` → Limitations |
 | P2-9 — `state` route accepts any method | Fixed | `lib/management.js` · `requireMethod(req, res, ['GET', 'HEAD'])` and `['POST']` on the other routes, with `Allow` | `test/management.test.mjs` › `methods are enforced with an allow header`; raw probe in `docs/security.md` (`DELETE` → `405 Allow: GET, HEAD`) |
 | P2-10 — oversized body destroys the socket, client sees only a reset | Fixed | `lib/management.js` · `readJsonBody` answers `413`, removes the data listener and drains (`req.resume()`) | `test/management.test.mjs` › `an oversized body is answered with 413 instead of a reset connection` |
 | P2-11 — panel action error cleared by the next poll | Fixed | `client.js` · separate `loadError` vs `outcome`; only a new action or a successful action snapshot clears the last action outcome | `test/client.test.mjs` › `a failed action stays visible after a following successful poll` |
@@ -112,37 +113,61 @@ probes, migration verdict) is
 | L4 — render the detail without changing the vocabulary | Fixed | `client.js` · `liveOf`, `liveLabelOf` (reconnecting attempt/retry, waiting-credentials), `retryHintOf` (Host clock), `detailOf` (`statusDetail` first, `live` fallback; a connected/closed cell never explains a past error), `.dsh-mcp-card-detail`, tag `title` = label + detail | `test/client.test.mjs` › `a reconnecting starting row names the attempt and hints the retry`; `a starting row waiting for credentials says so`; `an error row shows the Host detail on the card and in the tag hint`; `an error row without a Host detail falls back to live.lastError`; `a detail that disappears between polls is removed cleanly`; `a running row without live data renders exactly as before`; `an older Host row without live/statusDetail fields still renders`; F6 fix with `a stopped or stopping row does not inherit a stale live failure detail`; `a stopped row still shows the statusDetail the Host sent` |
 | L5 — one bounded detail line, total over any cell | Fixed | `lib/management.js` · `DETAIL_ERROR_MAX_CHARS` (120) clips the `lastError` **segment** (the whole detail also carries the `failed:`/`reconnecting …` prefix; observed max ≈177), `LIVE_ERROR_MAX_CHARS` (240) in the payload, `lastErrorSegment` renders only primitives so a hand-built object cannot throw | `test/management.test.mjs` › `the status detail clips a long lastError to one bounded line` (≤ 140 chars for that input, no newline); `F5: a hand-built non-string lastError cannot make the detail throw` |
 | L6 — read-only, no subscription, no write | Fixed | `lib/management.js` · `liveStatusOf` only calls `current()`; there is no `onChange` call anywhere and no write path is touched by a read | `test/management.test.mjs` › `reading live status never reaches a write path` (no `setPluginEnabled`, patch bytes unchanged); the live fixtures' `onChange` throws and the route test asserts it is never called |
-| L7 — capability and real-runtime evidence | Fixed | `scripts/probe-live-status.mjs` (capability gate) asserts A–D against a real Cordis Loader and the installed `@deepseek-ai/dsh-mcp-client`: `typeof entry.moduleNamespace.connectionStatusOf === 'function'` on every MCP row and `liveStatusOf()` reads both; a broken command ends `failed`/`ENOENT`, presented as `error` with the spawn text in `statusDetail`; a real mini stdio server ends `connected` with `toolCount >= 2`, presented as `running` with no detail; `collectServerRows` creates no `onChange` subscription. `scripts/live-boot.mjs` (behavioural gate) declares `mcp-probe-broken` / `mcp-probe-ok` and probes `/state`: `state-live-broken` requires `status: error`, `live.state: failed` and `statusDetail` containing `ENOENT` (the row's `fiberPhase` is `active` — inference alone would have said `idle`); `state-live-connected` requires `status: running`, `live.state: connected`, `live.toolCount: 2` and `statusDetail: null` | `node scripts/probe-live-status.mjs` → `PASS (8/8 assertions)`; a failed run prints its verdict, quiesces the rows, removes the temp home and exits 1 through its own code (`--json` adds `exitCode`/`cleanup`/`signals`; `PROBE_LIVE_FORCE_FAIL=1` is the negative self-test); `node scripts/live-boot.mjs` → `PASS (11/11)`, live rows settled in ≈65 ms with `--json` `skipsNotEvidence`/`authority`. Skips are printed and counted separately: a run that needed one exits 0 where CI/fallback require it, but its verdict is not the authoritative gate (fallback: `PASS (9/11, 2 skipped — fallback/no runtime: skips are not evidence)`). Suite-level fixture coverage of the same paths is L1–L6 above; commands and expected matrix in [test/README.md](../test/README.md) → *The gates* |
+| L7 — capability and real-runtime evidence | Fixed | `scripts/probe-live-status.mjs` (capability gate) asserts A–D against a real Cordis Loader and the installed `@deepseek-ai/dsh-mcp-client`: `typeof entry.moduleNamespace.connectionStatusOf === 'function'` on every MCP row and `liveStatusOf()` reads both; a broken command ends `failed`/`ENOENT`, presented as `error` with the spawn text in `statusDetail`; a real mini stdio server ends `connected` with `toolCount >= 2`, presented as `running` with no detail; `collectServerRows` creates no `onChange` subscription. `scripts/live-boot.mjs` (behavioural gate) declares `mcp-probe-broken` / `mcp-probe-ok` and probes `/state`: `state-live-broken` requires `status: error`, `live.state: failed` and `statusDetail` containing `ENOENT` (the row's `fiberPhase` is `active` — inference alone would have said `idle`); `state-live-connected` requires `status: running`, `live.state: connected`, `live.toolCount: 2` and `statusDetail: null` | `node scripts/probe-live-status.mjs` → `PASS (8/8 assertions)`; a failed run prints its verdict, quiesces the rows, removes the temp home and exits 1 through its own code (`--json` adds `exitCode`/`cleanup`/`signals`; `PROBE_LIVE_FORCE_FAIL=1` is the negative self-test); `node scripts/live-boot.mjs` → `PASS (11/11)`, live rows settled in ≈70 ms with `--json` `skipsNotEvidence`/`authority`. Skips are printed and counted separately: a run that needed one exits 0 where CI/fallback require it, but its verdict is not the authoritative gate (fallback: `PASS (9/11, 2 skipped — fallback/no runtime: skips are not evidence)`). Suite-level fixture coverage of the same paths is L1–L6 above; commands and expected matrix in [test/README.md](../test/README.md) → *The gates* |
 
 Not changed in 1.3.0 (recorded, so a reviewer does not look for it):
 
 - **mcp-manager migration** — deferred; evidence and preconditions in
   [architecture.md §5](architecture.md#5-mcp-manager-migration-verdict).
 - **P2-4** (hidden/leaked counts) and the **cross-process lock** remain the 1.2.1 residuals.
-- **P2-8** (agent/preset-scope MCP tools are outside the catalog) is now a 1.4 candidate.
+- **P2-8** (agent/preset-scope MCP tools are outside the catalog) is still an open
+  candidate (1.3.0 and 1.4.0 did not take it).
+
+## 1.4.0 — start-safety valve
+
+The 1.4.0 change is a **UI mitigation** for the upstream mid-spawn SIGTERM hazard (audit R1):
+`client.js` disables the panel's Stop/Restart while a row's Host status is `starting` and its
+live cell does not prove the transport settled, so a user click cannot dispose a
+`StdioClientTransport` inside the version-negotiation spawn window. It changes no route, no
+request body, no server half, and it does not fix the upstream disposal.
+
+| Item | Status | What changed (file · function) | Regression evidence (test file › test name) |
+|---|---|---|---|
+| H1 — panel Stop/Restart can dispose a transport mid-spawn | Mitigated (UI only; upstream not fixed) | `client.js` · `spawnHazard(server)` returns true only when `status === 'starting'` and the `live` cell is absent or its `state` is not `closed`; `card` computes `hazard = spawnHazard(server) && !busy`, sets `disabled` on both the switch and the restart button when `busy` or `hazard`, and adds the reason to each control's `title` / `aria-label` via the new dict key `hazard.starting` (EN/ZH) | `test/client.test.mjs` › `a starting row disables stop and restart and explains why`; `the starting hazard hint is localized`; `reconnecting and waiting-credentials starting rows are blocked too`; `a closed transport is not a spawn hazard, so the row stays controllable`; `a starting row without live data falls back to the hazard lock`; `running, idle, error and stopped rows keep their controls enabled`; `a stopped row is still startable`; `a pending action still disables every control` |
+| H2 — an activation that reaches a blocked control must not hit the wire | Fixed | `client.js` · the restart button and the switch both return before `act(...)` while `hazard` is set (no-POST guard) | `test/client.test.mjs` › `a starting row disables stop and restart and explains why` (invokes both handlers and asserts zero POSTs); `a closed transport is not a spawn hazard, so the row stays controllable` (the escape hatch still POSTs `{ entryId }` to `RESTART_URL`) |
+| H3 — escape hatch and the Start path must keep working | Verified | `client.js` · `spawnHazard` is false for a live `closed` cell and for every non-`starting` status; `busy` still wins, so a pending action disables the row as before | `test/client.test.mjs` › `a closed transport is not a spawn hazard, so the row stays controllable`; `a stopped row is still startable`; `a pending action still disables every control`; `running, idle, error and stopped rows keep their controls enabled` |
+
+Known residual (recorded, **not fixed** in 1.4.0): **R1** remains a platform/upstream issue.
+The panel guard covers only the user-driven case; a loader-driven reload/uninstall, a
+programmatic toggle (`mcp_server` is not guarded) and the Host's own disposal still reach
+`@modelcontextprotocol/client`'s `_dispose()` mid-spawn and can signal the caller's process
+group. End-to-end DSH shutdown through that path is **UNVERIFIED**. An upstream report is
+drafted at `dsh-mcp-progressive-review/2026-11-19/upstream-issue-mcp-sdk-sigterm.md` (outside
+this repo) and is **not filed**; no URL and no fix are claimed. See
+[security.md §8](security.md#8-residual-risks--deferred).
 
 ## Evidence run
 
-Environment: this worktree (1.3.0), Node v25.8.0, macOS, unpacked runtime present at
+Environment: this worktree (1.4.0), Node v25.8.0, macOS, unpacked runtime present at
 `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`, review catalog at
 `dsh-mcp-progressive-review/2026-11-19/probe/deepseek/catalog.json`.
 
 ```
 $ npm test                      # unpacked runtime present, MCP_REVIEW_CATALOG unset
-ℹ tests 191
-ℹ pass 188
+ℹ tests 199
+ℹ pass 196
 ℹ fail 0
 ℹ skipped 3
 
 $ MCP_REVIEW_CATALOG=<review catalog> npm test
-ℹ tests 191
-ℹ pass 191
+ℹ tests 199
+ℹ pass 199
 ℹ fail 0
 ℹ skipped 0
 
 $ DSH_RUNTIME=/nonexistent npm test      # what CI runs (no runtime, no catalog)
-ℹ tests 191
-ℹ pass 170
+ℹ tests 199
+ℹ pass 178
 ℹ fail 0
 ℹ skipped 21
 ```
@@ -150,16 +175,17 @@ $ DSH_RUNTIME=/nonexistent npm test      # what CI runs (no runtime, no catalog)
 The 3 cases skipped in the default local posture are the real-catalog schema cases; they only
 run when `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (private,
 not committed). The 21 CI skips are those 3 plus the 18 runtime-dependent cases. The 1.3.0
-live-status and audit-fix cases run in every posture (their fixtures need no runtime).
+live-status/audit-fix cases and the 1.4.0 hazard cases run in every posture (their fixtures
+need no runtime).
 
 ```
 $ node scripts/repro-review.mjs
-  ok  yaml  S3 — hand-written YAML rewrite corrupts a valid patch file
-  ok  managementAdmission  S1/S2 — the management routes have no admission and coerce `enabled`
-  ok  controlQueue  S5 — a stop and a start issued together execute only the stop
-  ok  client  S11 — a failed panel action is cleared by the next poll
-  ok  search  S9 — the catalog search is AND-shaped and case-sensitive
-  ok  fullSchema  S10 — `detail:"full"` prints an invalid JSON schema
+  ok     yaml                 S3 — hand-written YAML rewrite corrupts a valid patch file
+  ok     managementAdmission  S1/S2 — the management routes have no admission and coerce `enabled`
+  ok     controlQueue         S5 — a stop and a start issued together execute only the stop
+  ok     client               S11 — a failed panel action is cleared by the next poll
+  ok     search               S9 — the catalog search is AND-shaped and case-sensitive
+  ok     fullSchema           S10 — `detail:"full"` prints an invalid JSON schema
   0/6 defect families reproduced (6/6 evaluated)
   PASS — no reviewed defect reproduces (6/6 evaluated) (regression gate)
 $ echo $?
@@ -188,9 +214,9 @@ $ node scripts/live-boot.mjs        # default --expect fixed, real boot
   ok  state-live-connected     status=200  expected=200
         row: status=running fiberPhase=active live={"state":"connected","toolCount":2,"connectedAt":<run ms>} toolCount=2 statusDetail=null
 
-  live rows settled: yes (waited 71 ms)
+  live rows settled: yes (waited 74 ms)
 
-  PASS  (11/11)  (1959 ms)
+  PASS  (11/11)  (2024 ms)
 ```
 
 `live-boot` also snapshots both patch layers before and after the probes and fails unless
@@ -217,7 +243,7 @@ $ node scripts/probe-live-status.mjs
   PASS  C. real row: status running with toolCount 2 and no detail
 
   cleanup: quiesced yes (0 ms, states failed/connected); disposed 2; skipped 0;
-  servers 99899:process already gone, 99901:process already gone; spawned reaped 0;
+  servers 29795:process already gone, 29797:process already gone; spawned reaped 0;
   temp removed yes
 
   PASS  (8/8 assertions)
@@ -311,4 +337,4 @@ did not yet exist. Findings:
 | F6 — panel derived a live failure detail for a `stopped` row | Info | Fixed — client live fallback gated on `starting`/`error`/`running`/`idle`; Host `statusDetail` still renders on any status | `test/client.test.mjs` › `a stopped or stopping row does not inherit a stale live failure detail`; `a stopped row still shows the statusDetail the Host sent` |
 | F7 — `package-lock.json` still recorded 1.2.0 | Info | Non-issue — the lock is untracked/gitignored, not in the tarball, not read by CI | audit §7 |
 | F8 — "120 in `statusDetail`" described the error segment, not the whole line | Info | Fixed in docs — 120-char `lastError` segment; whole detail bounded by the reason prefix too (observed max ≈177) | `docs/architecture.md` §3, `docs/security.md` §3.1 |
-| R1 — upstream SDK `StdioClientTransport._dispose()` can signal the caller's process group when disposing mid-spawn | High impact, pre-existing | Documented residual — not introduced by 1.3.0; the gate quiesces, the plugin's Stop/Restart is platform-owned, end-to-end impact unverified | `docs/security.md` §8; audit §R1 |
+| R1 — upstream SDK `StdioClientTransport._dispose()` can signal the caller's process group when disposing mid-spawn | High impact, pre-existing | Documented residual — not introduced by 1.3.0; 1.4.0 mitigates the user-driven panel case (Start-safety valve, see §1.4.0), the gate quiesces, the disposal itself is platform-owned, other callers still reach it, end-to-end impact unverified | `docs/security.md` §8; audit §R1; `test/client.test.mjs` › the eight 1.4.0 hazard cases |
