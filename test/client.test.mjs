@@ -881,3 +881,58 @@ test('a pending action still disables every control', async () => {
     mounted.panel.unmount()
   }
 })
+
+test('a pending action wins over the hazard hint when the row turns starting', async () => {
+  // Start from a settled row so a Stop is allowed and held open; the next poll
+  // then reports the same row as `starting` + `connecting`, i.e. a row the
+  // hazard valve would block. Busy must win: the pending action keeps its own
+  // verb and the "finish starting" reason must not ride along.
+  const running = serverRow()
+  const starting = serverRow({ status: 'starting', toolCount: 0, live: { state: 'connecting', attempt: 0 } })
+  let rows = [running]
+  const posts = []
+  const releases = []
+  const fetch = (url, init) => {
+    if (init !== undefined && init.method === 'POST') {
+      posts.push({ url, body: JSON.parse(init.body) })
+      return new Promise((resolve) => {
+        releases.push(() => resolve(response(stateBody(rows))))
+      })
+    }
+    return Promise.resolve(response(stateBody(rows)))
+  }
+  const mounted = mountPanel({ fetch })
+  try {
+    await flushMicrotasks()
+    const stopping = toggleButton(mounted.panel.render()).props.onClick()
+
+    rows = [starting]
+    await mounted.panel.poll()
+    await flushMicrotasks()
+
+    const tree = mounted.panel.render()
+    const toggle = toggleButton(tree)
+    const restart = restartButton(tree)
+    // The tag follows the in-flight verb, not the new `starting` status.
+    assert.equal(textOf(byClass(tree, 'dsh-mcp-tag')), 'Stopping…')
+    assert.equal(byClass(tree, 'dsh-mcp-card').props['data-state'], 'stopping')
+    // The hazard reason only rides along while nothing else disables the row.
+    assert.equal(toggle.props.title, undefined, 'a busy switch must not grow a hazard title')
+    assert.doesNotMatch(String(toggle.props['aria-label']), new RegExp(HAZARD_HINT))
+    assert.doesNotMatch(String(restart.props.title), new RegExp(HAZARD_HINT))
+    assert.doesNotMatch(String(restart.props['aria-label']), new RegExp(HAZARD_HINT))
+    // Both controls stay disabled — by the pending action, not by the hazard.
+    assert.equal(toggle.props.disabled, true)
+    assert.equal(restart.props.disabled, true)
+    // The poll that revealed the hazard shape did not POST; only the held Stop did.
+    assert.equal(posts.length, 1, 'the busy presentation must not issue an extra POST')
+    assert.equal(posts[0].url, TOGGLE_URL)
+
+    for (const release of releases) release()
+    await stopping
+    await flushMicrotasks()
+    assert.equal(toggleButton(mounted.panel.render()).props.disabled, true, 'the row is still starting')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
