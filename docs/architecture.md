@@ -55,12 +55,12 @@ entry.moduleNamespace.connectionStatusOf(entry.fiber?.ctx?.fiber ?? entry.fiber)
 - The plugin never imports `@deepseek-ai/dsh-mcp-client` or re-implements its status cell: a
   second module instance has an empty `WeakMap` and answers `undefined` for another instance's
   fiber even at the same version, so the entry is the only honest channel.
-- This is a **public field of the Loader entry class, not a documented plugin contract**. Hence
-  the duck-typed guard and `try/catch`, and `scripts/probe-live-status.mjs`: a DSH release that
-  renames the seam should fail that capability gate loudly instead of degrading quietly.
-- Sanitization: `state`/`reason`/`lastError`/`toolCount`/`connectedAt`/`attempt`/`maxAttempts`/
-  `nextRetryAtMs` only, text collapsed and bounded (240 chars in the payload, 120 in the detail),
-  numbers finite; a disabled row is `stopped` (or `stopping` while its fiber is still up).
+- This is a **public field of the Loader entry class, not a documented plugin contract**: hence
+  the duck-typed guard, `try/catch`, and `scripts/probe-live-status.mjs` (a rename fails loudly).
+- Sanitization: whitelisted fields only; `lastError` renders primitives only and its segment is
+  clipped to 120 chars (the whole detail is also bounded by the reason prefix, max ≈177); numbers
+  are finite. A disabled row is `stopped` (or `stopping` while its fiber is up), an unloading row
+  `stopping`, and a failed fiber outranks a stale cell — the inference owns it.
 
 ## 4. Management half
 

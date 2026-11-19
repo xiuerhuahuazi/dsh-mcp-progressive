@@ -28,7 +28,9 @@ Added:
   vocabulary (`stopped|running|idle|starting|stopping|error|unknown`); the
   explanation is text, not a new token. A live `connected` generation's
   `toolCount` wins over the prefix count, `idle` means connected with 0 tools,
-  and a disabled or unloading row never reports the live state.
+  and a disabled, unloading or failed row never reports the live state (a
+  failed fiber outranks a stale cell, so its diagnostic is not masked by a
+  leftover `closed`).
 - `live` (whitelisted, bounded fields) and `statusDetail` in the
   `/dsh-mcp-hub/state` payload; `mcp_servers` and the `mcp_server` result append
   the same one-line detail (`reconnecting (attempt N/M) · retry in Ns · <last
@@ -42,14 +44,49 @@ Added:
   live row no longer exposes `connectionStatusOf`, when the broken row does not
   present as `error` with the spawn text, or when the connected row does not
   present as `running` with its live tool count — so a DSH rename fails loudly
-  instead of degrading to inference silently. `scripts/live-boot.mjs`
+  instead of degrading to inference silently. A failed run prints its verdict
+  and exits 1 through its own code: its cleanup quiesces the rows, reaps the
+  servers it spawned, removes the temp home and records (rather than dies by)
+  a signal, with `PROBE_LIVE_FORCE_FAIL=1` as the negative self-test.
+  `scripts/live-boot.mjs`
   additionally boots two real MCP rows — `mcp-probe-broken` (a command that
   cannot spawn) and `mcp-probe-ok` (a working local server) — and requires
   `status: error` / `live.state: failed` with an `ENOENT` detail, and
   `status: running` / `live.state: connected` with `toolCount: 2` and no detail
   (`PASS (11/11)`).
+- Gate verdicts count skips separately: a run that needed one still exits 0
+  where CI/fallback require it, but its verdict is not the authoritative gate
+  (`skipsNotEvidence` / `authority` in `--json`; `live-boot` fallback prints
+  `PASS (9/11, 2 skipped — fallback/no runtime: skips are not evidence)`,
+  `repro-review` `(5/6 evaluated, 1 skipped — skips are not evidence)`, and the
+  capability gate `SKIP … not evidence`).
 - `docs/architecture.md`: the plugin's seams, the mcp-manager migration verdict
   and its evidence, the do-not-do list, and the open product questions.
+
+Fixed (independent 1.3 review, commit `f523da1`, verdict **ship-with-notes**):
+
+- F3: `liveStatusView` now returns null for a `fiberPhase === 'failed'` row, so
+  the inference reports `error` with its diagnostic instead of a stale `closed`
+  cell presenting as `starting — closed` (test `F3: a failed fiber outranks a
+  stale live cell`).
+- F5: the detail builder is total — `lastErrorSegment` renders only strings,
+  numbers, booleans and bigints (clipped) and drops objects/arrays/symbols
+  instead of coercing them, so a hand-built cell cannot throw the exported
+  helper (`F5: a hand-built non-string lastError cannot make the detail throw`).
+- F6: the panel only derives a live failure detail while the row's own status is
+  `starting`/`error`/`running`/`idle`; a `stopped`/`stopping` row keeps a Host
+  `statusDetail` but never inherits a stale live failure
+  (`a stopped or stopping row does not inherit a stale live failure detail`,
+  `a stopped row still shows the statusDetail the Host sent`).
+- F2: the capability gate's failure path survives — cleanup quiesces rows before
+  disposing, leaves mid-spawn rows undisposed, reaps its server children,
+  removes the temp home and exits 1 through its own code (never 143).
+- F4: gate verdicts no longer call a skip a pass (see Added).
+- F8: docs say the `lastError` segment is clipped to 120 chars and the whole
+  one-line detail is bounded by the reason prefix too (observed max ≈177).
+- F1 was a release-step issue, not code: the `v1.3.0` tag must exist before the
+  install spec is announced. F7 (`package-lock.json` still says 1.2.0) is a
+  non-issue here — the lock is untracked and gitignored.
 
 Changed:
 
@@ -58,11 +95,18 @@ Changed:
   vocabulary; the limitations record the fallback and the deferred migration.
 - Install documentation moves to 1.3.0 (GitHub tag; npm still 1.2.0).
 - `docs/fix-map.md` gains the 1.3.0 item → change → regression table and the
-  current suite postures (187 tests); `docs/security.md` records the read-only
+  current suite postures (191 tests); `docs/security.md` records the read-only
   live-status path; `test/README.md` documents the new cases and scripts.
 
 Deferred:
 
+- R1 (upstream, pre-existing): `@modelcontextprotocol/client`'s
+  `StdioClientTransport._dispose()` can call `proc.kill("SIGTERM")` on a
+  transport whose spawn has not completed, and a `ChildProcess` without a pid
+  forwards that to the caller's process group. Observed through the capability
+  gate's failure path (the gate now quiesces first); the plugin's own
+  Stop/Restart is platform-owned, end-to-end impact unverified, and it is not
+  introduced by this plugin. See `docs/security.md` → residual risks.
 - The migration to the official `mcpManager`: not a capability gap but a
   configuration-ownership change. In this deployment the manager composes 0
   servers; it owns only `Config.servers`; home-patch rows are invisible to it;

@@ -97,8 +97,11 @@ disconnected entirely (its child process exits) without unloading this plugin:
   detail prefer the **live MCP client cell** (see *Live connection status* below): a reconnecting
   row names its attempt budget and the next retry, a row blocked on credentials says so, and a
   failed row shows `failed: <reason> · <last error>`. The full detail also stays in the tag's
-  `title`, so the clamped second line loses nothing. Where the live cell is available,
-  "connected, no tools" is now reported only for `connected` with `toolCount: 0`. The list
+  `title`, so the clamped second line loses nothing. The client only rebuilds a live-derived
+  detail for a row that is still `starting`/`error`/`running`/`idle`: a `stopped`/`stopping` row
+  renders a Host `statusDetail` if one was sent, but never inherits a stale live failure. Where
+  the live cell is available, "connected, no tools" is now reported only for `connected` with
+  `toolCount: 0`. The list
   reuses the built-in Plugins page card design (48px icon tile, 14px card title, 13px
   description, status tag, 36×20 switch) and DSH theme tokens only, so it matches the host in
   light and dark themes. It polls the same-origin routes; no client RPC surface is added.
@@ -183,8 +186,11 @@ maps it onto the **unchanged** public status vocabulary:
 The vocabulary stays `stopped | running | idle | starting | stopping | error | unknown`; the
 detail is **text**, never a new token, so a model reading `mcp_servers` sees the same statuses
 as before plus one explanatory line. A row configured off is `stopped` (or `stopping` while
-its fiber is still up) and an unloading row is `stopping`, whatever the last cell says: the live
-read only decides a row that is enabled and not unloading.
+its fiber is still up), an unloading row is `stopping`, and a row whose **fiber failed** is
+decided by the inference — a failed re-apply disposes the old supervisor before the new apply
+throws, so the cell can still say `closed` while the fiber is `failed`; the `error` status and
+the diagnostic win there. The live read only decides a row that is enabled, not unloading and
+not failed.
 
 The seam is guarded, because it is **not an officially documented plugin contract**: it is a
 public field on the Loader entry class, and the MCP client exports `connectionStatusOf` as part
@@ -307,13 +313,13 @@ What follows from the formula:
 
 Everything runs locally with no network and no access to `~/.dsh`:
 
-- `npm test` — the suite in `test/` (`node --test`), **187** tests. With the unpacked DSH
+- `npm test` — the suite in `test/` (`node --test`), **191** tests. With the unpacked DSH
   runtime present (`$DSH_RUNTIME`, default `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`) it
-  is 184 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
-  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 187 pass
+  is 188 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
+  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 191 pass
   / 0 skip; the catalog is private and not committed). On CI (`.github/workflows/test.yml`,
   Node 22 and 24) neither the runtime nor that catalog exists, so the 18 runtime-dependent and
-  the 3 real-catalog cases skip: 166 pass / 21 skip / 0 fail.
+  the 3 real-catalog cases skip: 170 pass / 21 skip / 0 fail.
 - `node scripts/repro-review.mjs` — the review-defect **regression gate** (default
   `--expect fixed`). It replays the six defect families from the 2026-11-19 review and exits 0
   only when none of them reproduces; otherwise it prints `REGRESSION: <families>` and exits 1.
@@ -323,7 +329,9 @@ Everything runs locally with no network and no access to `~/.dsh`:
   `0/6 defect families reproduced` / `PASS` and exits 0. `--expect baseline` is the historical
   1.2.0 evidence mode: it passes only on a `v1.2.0` checkout (6/6 reproduced) and otherwise
   reports `NOT A 1.2.0 CHECKOUT`. Without the DSH runtime the YAML family is reported as
-  `skip`, never as a pass.
+  `skip`: the verdict counts it separately (`(5/6 evaluated, 1 skipped — skips are not
+  evidence)` on both the reproduced and the PASS line) and `--json` carries `skipsNotEvidence`
+  / `authority`, so a skipped run is not the six-family gate.
 - `node scripts/live-boot.mjs` — the real-platform **behavioural gate** (default `--expect fixed`,
   **11/11 probes**). It boots a throw-away real DSH web instance (`DSH_HOME` in a temp directory,
   OS-assigned port) with the package installed, mints the browser session cookie and drives the
@@ -339,10 +347,13 @@ Everything runs locally with no network and no access to `~/.dsh`:
   `state-live-connected`, which requires `status: "running"`, `live.state: "connected"`,
   `live.toolCount: 2` and `statusDetail: null`; both rows settle in ≈65 ms (`live rows settled:
   yes`). Result on this tree: `PASS (11/11)`. `--expect baseline` documents the 1.2.0 matrix and
-  only matches a `v1.2.0` checkout; it reports the two live probes as `skip`, and a skip is never
-  counted as a pass. Without the unpacked runtime the gate falls back to an in-process HTTP
-  server behind a stub fence (`mode: fallback-http`, `platformAuthority: false`) and the live
-  probes are skipped there too — there is no real Loader row to assert.
+  only matches a `v1.2.0` checkout; it reports the two live probes as `skip`. A skip is printed
+  and counted separately: a run that needed one exits 0 where CI/fallback require it, but its
+  verdict is not the authoritative gate — the fallback prints `PASS (9/11, 2 skipped —
+  fallback/no runtime: skips are not evidence)` and `--json` carries `skipsNotEvidence` /
+  `authority`. Without the unpacked runtime the gate falls back to an in-process HTTP server
+  behind a stub fence (`mode: fallback-http`, `platformAuthority: false`) and the live probes are
+  skipped there too — there is no real Loader row to assert.
 - `node scripts/probe-live-status.mjs` — the seam's **capability gate** (1.3.0), independent of
   the HTTP stack so a panel or admission regression cannot hide a seam regression. Against a real
   Cordis Loader and the installed `@deepseek-ai/dsh-mcp-client` it asserts (A)
@@ -351,11 +362,14 @@ Everything runs locally with no network and no access to `~/.dsh`:
   with `ENOENT` in `lastError`, presented as `error` with the spawn text in `statusDetail`; (C) a
   row running a minimal stdio MCP server ends `connected` with `toolCount ≥ 2`, presented as
   `running` with no detail; (D) `collectServerRows` creates no `onChange` subscription. It exits
-  0 only when every assertion passes; without the DSH runtime it prints `SKIP: runtime
-  unavailable` (and which packages are missing) and exits 0, so a runtime-less checkout stays
-  green — `--json` marks `skipped: true`. Run it on every DSH upgrade: the plugin's guarded
-  fallback keeps working when the seam moves, but this gate turns that silent downgrade into a
-  red line.
+  0 only when every assertion passes; a failed run prints the verdict and exits **1** through its
+  own code — its cleanup quiesces the rows first, so the upstream mid-spawn `SIGTERM` hazard
+  (see Limitations) cannot turn the verdict into a signal death or leak the temp home
+  (`--json` adds `exitCode`, `cleanup` and `signals`; `PROBE_LIVE_FORCE_FAIL=1` is the hidden
+  negative self-test). Without the DSH runtime it prints `SKIP: runtime unavailable` (and which
+  packages are missing) and exits 0, so a runtime-less checkout stays green — `--json` marks
+  `skipped: true`, `authority: false`. Run it on every DSH upgrade: the plugin's guarded fallback
+  keeps working when the seam moves, but this gate turns that silent downgrade into a red line.
 
 The `repro-review` and `live-boot` fixed/baseline modes were checked against the `v1.2.0` tag in
 both directions by the regression lane: on `v1.2.0` the baseline modes pass and the fixed modes
@@ -382,6 +396,13 @@ mapping is in [docs/fix-map.md](docs/fix-map.md).
   lock: a concurrent `plugin_manager` (pnpm) write is detected and retried, but not coordinated.
 - `mcp_servers` does not report how many catalog tools are hidden or leaked (deferred: that needs
   disclosure state private to the Host half); a failed mask is reported by one warning in the log.
+- An upstream SDK behaviour can signal the caller's process group: `@modelcontextprotocol/client`'s
+  `StdioClientTransport._dispose()` may call `proc.kill("SIGTERM")` on a transport whose spawn has
+  not completed, and a `ChildProcess` with no pid forwards that to pid 0. It is pre-existing
+  (identical in 1.2.1), not introduced by this plugin; the capability gate now quiesces before
+  disposing, but the plugin's own Stop/Restart is platform-owned. Observed through the gate's
+  failure path; the end-to-end app impact is **unverified**, and Stop/Restart on a row that is
+  still starting should be treated as a known hazard until the SDK is fixed.
 - Live status depends on a seam that DSH does not document as a plugin contract: when the Host
   does not expose `Entry.moduleNamespace.connectionStatusOf` (or the read throws), the plugin
   falls back silently to the 1.2.1 inference from loader rows, diagnostics and registered tool
@@ -494,7 +515,9 @@ id 的 agent 不会共享同一份遮蔽。Harness 重启即重置。`eagerTools
   实时详情、启动诊断（有时）、重启按钮和启停开关。状态与详情优先来自**运行中 MCP 客户端的实时
   状态单元**（见下面「实时连接状态」）：重连中的行会写明第几次尝试及下次重试时间，等待凭据的行会
   直说，失败的行显示 `failed: <原因> · <最近错误>`；完整详情同时留在标签的 `title` 里，被截断的
-  第二行不会丢信息。有实时单元时，只有它报告 `connected` 且 `toolCount: 0` 才显示「已连接（无工具）」。
+  第二行不会丢信息。客户端只为仍在 `starting`/`error`/`running`/`idle` 的行重建实时详情：
+  `stopped`/`stopping` 的行若 Host 给了 `statusDetail` 就照常显示，但绝不继承过期的实时失败。
+  有实时单元时，只有它报告 `connected` 且 `toolCount: 0` 才显示「已连接（无工具）」。
   卡片沿用插件页既有设计（48px 图标、14px 卡片标题、13px 描述、状态标签、
   36×20 开关）且只用 DSH 主题 token，明暗主题都与宿主一致；数据来自同源路由，不新增客户端 RPC。
 - **模型工具**：`mcp_servers` 列出所有已配置服务器及状态，并附同一行实时详情；
@@ -564,8 +587,9 @@ lastError }`、`waiting-credentials { lastError }`、`failed { reason, lastError
 
 词表仍是 `stopped | running | idle | starting | stopping | error | unknown`；详情是**文本**，
 不是新状态词，所以读 `mcp_servers` 的模型看到的状态和以前一致，只多一行解释。配置为关闭的行是
-`stopped`（fiber 仍在时是 `stopping`）、正在卸载的行是 `stopping`，无论最后一个状态单元说什么：
-实时状态只裁决「已启用且未在卸载」的行。
+`stopped`（fiber 仍在时是 `stopping`）、正在卸载的行是 `stopping`，而**fiber 已失败**的行由推断
+裁决——失败的重应用会先 dispose 旧 supervisor 再让新 apply 抛错，此时状态单元仍可能是 `closed`，
+所以失败行以 `error` 状态与 `diagnostic` 为准。实时状态只裁决「已启用、未在卸载、且未失败」的行。
 
 这条缝有守卫，因为它**不是被官方文档化的插件契约**：它是 Loader entry 类上的公开字段，而 MCP
 客户端把 `connectionStatusOf` 作为模块表面的一部分导出（判断
@@ -655,20 +679,21 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
 
 全部本地运行，不联网、不读写 `~/.dsh`：
 
-- `npm test`——`test/` 下的测试（`node --test`），共 **187** 个。在 `$DSH_RUNTIME`（默认
-  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 184 通过 / 3 跳过 /
+- `npm test`——`test/` 下的测试（`node --test`），共 **191** 个。在 `$DSH_RUNTIME`（默认
+  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 188 通过 / 3 跳过 /
   0 失败：三个「真实目录」schema 用例只有把 `MCP_REVIEW_CATALOG` 指向评审用 210 工具目录的
-  本地副本时才运行（此时 187 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。CI
+  本地副本时才运行（此时 191 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。CI
   （`.github/workflows/test.yml`，Node 22 与 24）既没有解包运行时、也没有该目录，于是 18 个
-  依赖运行时的用例 + 3 个真实目录用例跳过：166 通过 / 21 跳过 / 0 失败。
+  依赖运行时的用例 + 3 个真实目录用例跳过：170 通过 / 21 跳过 / 0 失败。
 - `node scripts/repro-review.mjs`——评审缺陷**回归门**（默认 `--expect fixed`）。它把
   2026-11-19 评审的六组缺陷在当前代码上重放，只有一组都不复现时才 exit 0；否则打印
   `REGRESSION: <families>` 并 exit 1。凡是能观察到「修好后的结果」的组（准入、控制队列、
   面板渲染出的操作消息、检索召回、schema 适配），门也要求那个结果，因此局部回退无法藏在
   「未复现」后面。本检出输出 `0/6 defect families reproduced` / `PASS` 且 exit 0。
   `--expect baseline` 是历史的 1.2.0 证据模式：只有在 `v1.2.0` 检出上才通过（6/6 复现），
-  否则报告 `NOT A 1.2.0 CHECKOUT`。没有 DSH 运行时的情况下 YAML 那组报告为 `skip`，绝不当作
-  通过。
+  否则报告 `NOT A 1.2.0 CHECKOUT`。没有 DSH 运行时的情况下 YAML 那组报告为 `skip`：结论行会
+  单独计数（复现行与 PASS 行都显示 `(5/6 evaluated, 1 skipped — skips are not evidence)`），
+  `--json` 带 `skipsNotEvidence` / `authority`，因此带 skip 的运行不是六组回归门。
 - `node scripts/live-boot.mjs`——真实平台的**行为门**（默认 `--expect fixed`，**11/11 个探针**）。
   它用临时 `DSH_HOME` 和操作系统分配的端口启动一个真实 DSH Web 实例并安装本包，从启动令牌换取
   浏览器 cookie，再用 `node:http` 探测路由（因此显式 `Host` 真的会到达服务器）。未认证探针接受
@@ -681,9 +706,12 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
   `state-live-connected`：要求 `status: "running"`、`live.state: "connected"`、
   `live.toolCount: 2`、`statusDetail: null`。两行都在 ≈65 ms 内稳定（`live rows settled:
   yes`）。本检出结果：`PASS (11/11)`。`--expect baseline` 记录 1.2.0 矩阵，只在 `v1.2.0`
-  检出上成立；它把这两个实时探针报告为 `skip`，而 skip 绝不算通过。没有解包运行时则退回进程内
-  HTTP 服务器 + 桩围栏（`mode: fallback-http`、`platformAuthority: false`），实时探针同样跳过——
-  没有真实 Loader 行可供断言。
+  检出上成立；它把这两个实时探针报告为 `skip`。skip 会单独打印并计数：需要 skip 的运行在
+  CI/fallback 要求下仍 exit 0，但它的结论不是权威门——fallback 打印
+  `PASS (9/11, 2 skipped — fallback/no runtime: skips are not evidence)`，`--json` 带
+  `skipsNotEvidence` / `authority`。没有解包运行时则退回进程内 HTTP 服务器 + 桩围栏
+  （`mode: fallback-http`、`platformAuthority: false`），实时探针同样跳过——没有真实 Loader 行
+  可供断言。
 - `node scripts/probe-live-status.mjs`——这条缝的**能力门**（1.3.0），不依赖 HTTP 栈，因此面板或
   准入的回归藏不住缝本身的回归。它对着真实 Cordis Loader 与已安装的
   `@deepseek-ai/dsh-mcp-client` 断言：(A) 每条 MCP 行上
@@ -691,9 +719,12 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
   能读到两行；(B) 命令无法 spawn 的行最终为 `failed`、`lastError` 带 `ENOENT`，呈现为 `error`
   且 `statusDetail` 含 spawn 文本；(C) 运行最小 stdio MCP 服务器的行最终为 `connected`、
   `toolCount ≥ 2`，呈现为 `running` 且无详情；(D) `collectServerRows` 不创建任何 `onChange`
-  订阅。只有全部断言通过才 exit 0；没有 DSH 运行时则打印 `SKIP: runtime unavailable`（并列出缺失
-  的包）且 exit 0，让无运行时的检出保持绿色，`--json` 会标记 `skipped: true`。每次升级 DSH 都该跑它：
-  插件带守卫的回落会让缝被移动时功能继续降级运行，而这个门把「静默降级」变成红线。
+  订阅。只有全部断言通过才 exit 0；失败的运行会打印结论并由脚本自己 exit **1**——清理会先把各行
+  quiesce，因此上游 mid-spawn 的 `SIGTERM` 隐患（见「限制」）不会把结论变成信号死亡或泄漏临时目录
+  （`--json` 增加 `exitCode`、`cleanup`、`signals`；`PROBE_LIVE_FORCE_FAIL=1` 是隐藏的负向自测）。
+  没有 DSH 运行时则打印 `SKIP: runtime unavailable`（并列出缺失的包）且 exit 0，让无运行时的检出保持
+  绿色，`--json` 标记 `skipped: true`、`authority: false`。每次升级 DSH 都该跑它：插件带守卫的回落
+  会让缝被移动时功能继续降级运行，而这个门把「静默降级」变成红线。
 
 回归线已用 `v1.2.0` 标签双向核对 `repro-review` 与 `live-boot` 的 fixed/baseline 模式：在
 `v1.2.0` 上 baseline 模式通过、fixed 模式失败；在本版本上相反。`probe-live-status` 是能力断言
@@ -717,6 +748,12 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
   `plugin_manager`（pnpm）写入会被检测并重试，但不会被协调。
 - `mcp_servers` 不报告有多少目录工具被隐藏或泄漏（推迟：需要 Host 半侧私有的披露状态）；遮蔽
   失败只在日志里留一条警告。
+- 上游 SDK 有一种会把信号发给调用方进程组的行为：`@modelcontextprotocol/client` 的
+  `StdioClientTransport._dispose()` 可能在 transport 的 spawn 尚未完成时调用
+  `proc.kill("SIGTERM")`，而没有 pid 的 `ChildProcess` 会把它转发给 pid 0。它是既有问题
+  （1.2.1 同样存在），不是本插件引入的；能力门现在会先 quiesce 再 dispose，但插件自己的
+  停止/重启由平台拥有。该信号在能力门的失败路径上被观察到，端到端对应用的影响**未验证**；
+  在 SDK 修复前，对仍在启动中的行执行停止/重启应视为已知风险。
 - 实时状态依赖一条 DSH 未文档化为插件契约的缝：当 Host 不提供
   `Entry.moduleNamespace.connectionStatusOf`（或读取抛错）时，插件静默回落到 1.2.1 的推断
   （loader 行、诊断与已注册工具名）；此时已启用但重连预算耗尽的服务器可能显示为「已连接（无工具）」，

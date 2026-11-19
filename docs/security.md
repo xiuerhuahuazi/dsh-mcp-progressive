@@ -99,10 +99,12 @@ It is read-only:
   called: the client returns a disposer and there is no host-owned place for the plugin to keep
   it, so per-request subscription would leak);
 - the copied data is **whitelisted**: `state`, `reason`, `lastError`, `toolCount`, `connectedAt`,
-  `attempt`, `maxAttempts`, `nextRetryAtMs`; text is collapsed to one line and bounded (240
-  chars in the payload, 120 in `statusDetail`), numbers must be finite, and a value that is not
-  an object with a non-empty string `state` is dropped entirely, so a status cell cannot smuggle
-  fields into the payload;
+  `attempt`, `maxAttempts`, `nextRetryAtMs`; `lastError` is collapsed to one line and its segment
+  is clipped to 120 chars in `statusDetail` (the whole detail is also bounded by the
+  `failed: <reason>` / `reconnecting …` prefix — observed max ≈177 chars in total), numbers must
+  be finite, and a value that is not an object with a non-empty string `state` is dropped
+  entirely, so a status cell cannot smuggle fields into the payload; `lastError` is rendered only
+  from primitive values, so a hand-built object cannot throw the detail builder;
 - the plugin adds **no credential or argument material** of its own: `lastError` is the MCP
   client's own error line, surfaced to the authenticated panel/model as the client wrote it
   (the plugin does not expand `${credential:…}` templates or echo argv), and `targetSummary`'s
@@ -230,7 +232,10 @@ state (≈65 ms; `live rows settled: yes`) and asserts `state-live-broken` / `st
 as in the table above; the broken row is `fiberPhase: active` while its live state is `failed`,
 which is exactly why inference alone would have said "idle". On this tree the gate is
 `PASS (11/11)`. `--expect baseline` documents the 1.2.0 matrix and only matches a v1.2.0
-checkout; it reports the two live probes as `skip`, and a skip is never a pass. Without the
+checkout; it reports the two live probes as `skip`. A skip is printed and counted separately:
+a run that needed one exits 0 where CI/fallback require it, but its verdict is not the
+authoritative gate — the fallback prints `PASS (9/11, 2 skipped — fallback/no runtime: skips
+are not evidence)` and `--json` carries `skipsNotEvidence` / `authority`. Without the
 unpacked runtime the script falls back to an in-process HTTP server behind a stub fence and
 reports `mode: fallback-http`, `platformAuthority: false`; the live probes are skipped there too
 (no real Loader row) — the handler contract, not the platform wiring.
@@ -244,8 +249,11 @@ it requires that outcome too. Its management family drives the real handlers wit
 **stub** connection fence that mirrors the platform (untrusted `Host` → `403`, no cookie →
 `401`) — `scripts/live-boot.mjs` remains the real-platform authority. Without the DSH
 runtime the YAML family reports `skip` (the platform insert/override rule cannot be stubbed
-honestly) and the gate still exits 0 when nothing reproduces; a skip is never a pass.
-`--expect baseline` is the historical 1.2.0 mode and passes only on a v1.2.0 checkout.
+honestly) and the gate still exits 0 when nothing reproduces; the verdict counts it separately
+(`(5/6 evaluated, 1 skipped — skips are not evidence)` in both the reproduced line and the
+PASS line) and `--json` carries `skipsNotEvidence` / `authority`, so a skipped run is not the
+six-family gate. `--expect baseline` is the historical 1.2.0 mode and passes only on a v1.2.0
+checkout.
 
 The `repro-review` and `live-boot` gates were checked against the `v1.2.0` tag in both
 directions: on `v1.2.0` the baseline modes pass and the fixed modes fail, and on this release
@@ -265,23 +273,29 @@ minimal stdio MCP server exposing two tools):
 | C | The real row ends `connected` with `toolCount >= 2`, presented as `status: running` with no detail |
 | D | `collectServerRows` creates no `onChange` subscription (public `onChange` instrumented before the read; the client's private observer set checked when readable) |
 
-It exits 0 only when all eight assertions pass. Without the DSH runtime it prints
-`SKIP: runtime unavailable` (plus the missing packages) and exits 0, so a runtime-less checkout
-stays green — `--json` marks `skipped: true` and carries the checks and the observed rows. A
-skip is never a pass; the script exists so a DSH release that moves the seam fails loudly
-instead of quietly degrading to the inference.
+It exits 0 only when all eight assertions pass. A failed run prints the verdict and exits 1
+through its own code, never 143: cleanup quiesces the rows (bounded) before disposing, leaves a
+row that is still mid-spawn undisposed, reaps the server children it created (pid files plus a
+bounded command-line scan), removes the temp home, and records an in-process `SIGTERM` instead of
+letting it decide the exit. `--json` adds `exitCode`, `cleanup` and `signals`; the hidden
+`PROBE_LIVE_FORCE_FAIL=1` knob exercises that negative path without editing an assertion
+(observed: exit 1, temp home removed, no leak). Without the DSH runtime it prints `SKIP: runtime
+unavailable` (plus the missing packages) and exits 0, so a runtime-less checkout stays green —
+`--json` marks `skipped: true`, `authority: false`, and the printed line says the skip is not
+evidence. The script exists so a DSH release that moves the seam fails loudly instead of quietly
+degrading to the inference.
 
 ### 7.4 Fixture note
 
 The real-runtime smoke fixture that previously lacked a Host `connection` service is fixed in
 `02fe061`: `mountPlugin()` now provides it (and `mountPlugin({ connection: false })` models a
-host without it). With the runtime present `npm test` is 187 tests, 184 pass / 3 skip /
+host without it). With the runtime present `npm test` is 191 tests, 188 pass / 3 skip /
 0 fail (the three optional real-catalog cases skip unless `MCP_REVIEW_CATALOG` points at a
-local copy of the review catalog, which makes it 187 pass / 0 skip), and on CI — no runtime,
-no catalog — it is 187 tests, 166 pass / 21 skip / 0 fail. The 1.3.0 live-status cases run in
+local copy of the review catalog, which makes it 191 pass / 0 skip), and on CI — no runtime,
+no catalog — it is 191 tests, 170 pass / 21 skip / 0 fail. The 1.3.0 live-status cases run in
 every posture: their fixtures need no DSH runtime.
 
-### 7.5 Independent audits (2026-11-19)
+### 7.5 Independent 1.2.1 audits (2026-11-19)
 
 Two adversarial audits of this candidate (`audit-security.md`, `audit-core-docs.md`) shaped
 the final code:
@@ -302,11 +316,12 @@ the final code:
   Agent/SystemPrompt seams are still stubbed) and F7 is recorded as the live-boot gate's
   coverage boundary in §7.1.
 
-Final postures on this tree: `npm test` 187 tests — 184 pass / 3 skip / 0 fail locally,
-187 pass / 0 skip with `MCP_REVIEW_CATALOG`, 166 pass / 21 skip / 0 fail on a runtime-less
-CI; `node scripts/repro-review.mjs` PASS `0/6`; `node scripts/live-boot.mjs` PASS `11/11`
-(real boot, including `state-live-broken` / `state-live-connected`); `node
-scripts/probe-live-status.mjs` PASS (8/8 assertions, `live-status-seam`).
+Final postures on this tree: `npm test` 191 tests — 188 pass / 3 skip / 0 fail locally,
+191 pass / 0 skip with `MCP_REVIEW_CATALOG`, 170 pass / 21 skip / 0 fail on a runtime-less
+CI; `node scripts/repro-review.mjs` PASS — no reviewed defect reproduces (6/6 evaluated);
+`node scripts/live-boot.mjs` PASS `(11/11)` (real boot, including `state-live-broken` /
+`state-live-connected`); `node scripts/probe-live-status.mjs` PASS (8/8 assertions,
+`live-status-seam`).
 
 ## 8. Residual risks / deferred
 
@@ -324,6 +339,37 @@ scripts/probe-live-status.mjs` PASS (8/8 assertions, `live-status-seam`).
   1.2.1 inference and can again read "connected, no tools" while its server is in a failed
   reconnect state (a recorded `diagnostic` does surface as `error`). This is a fidelity
   residual, not a security one: the read adds no write path and cannot forge "connected".
+- R1 (upstream, pre-existing, found by the 1.3 review): `@modelcontextprotocol/client`'s
+  `StdioClientTransport._dispose()` can call `proc.kill("SIGTERM")` on a transport whose spawn
+  has not completed; a `ChildProcess` with no pid forwards that to pid 0, the caller's process
+  group. The capability gate now quiesces before disposing (and records rather than dies by a
+  signal), but the plugin's own Stop/Restart is platform-owned, so stopping a row while it is
+  still starting can in principle signal the Host's process group and trigger its graceful
+  shutdown. The signal delivery is observed through the gate's failure path; the end-to-end app
+  impact is **unverified**. It is identical in 1.2.1 and not introduced by this plugin; report
+  upstream and treat it as a known hazard until fixed.
 - Deletion of `.mcp-hub.bak`/temporary files is not managed: the backup is rewritten in
   place, and a crash mid-rename can leave a random-suffix temporary (never a truncated
   target, because the rename is atomic).
+
+## 9. Independent 1.3 review (`audit-1.3-live-status.md`)
+
+Commit audited: `f523da1200bc3e7069fc62f97b584284c39069b6` (`main`); verdict
+**ship-with-notes**. The reviewer read the final code and the vendored runtime, ran every gate,
+and used throwaway probes (real Loader in a temp dir, fake-browser rendering, route fuzzing,
+install-spec resolution). Its gate numbers at that commit: `npm test` 187 / 184 pass / 3 skip;
+with `MCP_REVIEW_CATALOG` 187 / 0; `DSH_RUNTIME=/nonexistent` 166 / 21; `repro-review`
+`0/6` PASS; `live-boot` `PASS (11/11)` with the live rows settled in 66 ms; `probe-live-status`
+8 assertions PASS; a pinned-sha `npm pack` resolved to 1.3.0, while `#v1.3.0` did not (F1).
+
+| Finding | Severity | Status in this tree |
+|---|---|---|
+| F1 — the documented `#v1.3.0` install spec did not resolve; the CHANGELOG said the tag was already published | High (release step, not code) | Operational: the tag must exist before the install spec is announced; the release notes record the pinned commit. No sha is claimed in the repo. |
+| F2 — capability gate failed by SIGTERM (143) in cleanup instead of its own exit, leaking the temp home | Medium | Fixed: cleanup quiesces rows before disposing, leaves mid-spawn rows undisposed, reaps the server children, removes the temp home and exits 1 through its own code; `PROBE_LIVE_FORCE_FAIL=1` is the negative self-test. |
+| F3 — a live cell outranked a failed fiber, so a failed re-apply read `starting — closed` | Low | Fixed: `liveStatusView` returns null on `fiberPhase === 'failed'`, so the inference reports `error` with its diagnostic; test `F3: a failed fiber outranks a stale live cell`. |
+| F4 — "a skip is never a pass" contradicted the gates printing PASS / exit 0 while skipping assertions | Low (wording/semantics) | Fixed: verdicts print and count skips separately; `--json` carries `skipsNotEvidence` / `authority`. |
+| F5 — a hand-built non-string `lastError` with a throwing `toString` could throw the exported detail builder | Info | Fixed: `lastErrorSegment` renders primitives only (objects/arrays/symbols dropped); test `F5: a hand-built non-string lastError cannot make the detail throw`. |
+| F6 — the panel could add a live-derived failure detail to a row the Host reports as `stopped` | Info | Fixed: the client's live fallback is gated on `starting`/`error`/`running`/`idle`; a Host `statusDetail` still renders on any status; tests `a stopped or stopping row does not inherit a stale live failure detail`, `a stopped row still shows the statusDetail the Host sent`. |
+| F7 — `package-lock.json` still recorded 1.2.0 | Info | Non-issue: the lock is untracked and gitignored; it is not in the tarball and `npm test` does not read it. |
+| F8 — "120 in `statusDetail`" described the `lastError` segment, not the whole line | Info | Fixed in the docs: the `lastError` segment is clipped to 120 chars and the whole one-line detail is bounded by the reason prefix too (observed max ≈177). |
+| R1 — upstream SDK `StdioClientTransport._dispose()` can signal the caller's process group when disposing mid-spawn | High impact, pre-existing | Documented residual (§8), not fixed here: the gate quiesces, the plugin's Stop/Restart is platform-owned, end-to-end app impact unverified, identical in 1.2.1. |

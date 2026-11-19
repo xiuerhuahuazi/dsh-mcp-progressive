@@ -57,7 +57,7 @@ Test names are verbatim from the files; a test may cover several rows.
 | P1-5 — no prompt hint that the catalog exists | Fixed | `index.js` · `systemPrompt.section({ name: 'mcp-progressive:catalog', order: 3050, text })` — server names/counts up to 4, `mcp_search` pointer, empty catalog contributes `''` | `test/core.test.mjs` › `P1-5: the catalog prompt section is per-assembly and contributes nothing without a catalog` |
 | P1-6 — `mcp_call` drops the MCP error body and presentation meta | Partially fixed | `index.js` · `contentText`, error branch of `mcp_call.execute` returns `Error from MCP tool "…": <server text>` (dedupes the native `Error: ` wrapper); `pendingResults` + `projectContent` forward content blocks and images. Nested `meta` has no seam into the outer card — documented in `README.md` → Limitations | `test/core.test.mjs` › `P1-6: mcp_call returns the MCP error text content instead of a bare message` |
 | P1-7 — `mcp_server` has no approval gate | Fixed | `index.js` · `tools/pre-execute` handler returns `{ kind: 'ask', reason, displayReason }` for `mcp_server` start/stop/restart; `displayReason` is a `{ en, zh }` locale record as the platform contract declares (audit F6); `mcp_servers` and the browser routes are not gated | `test/core.test.mjs` › `P1-7: mcp_server writes ask for approval while mcp_servers stays ungated` |
-| P1-8 — untestable pure helpers; no test script | Fixed | Host half split into `lib/patch.js` / `lib/search.js` / `lib/management.js`; `index.js` · `__test` exports the seams; `test/*.test.mjs` with `node --test`; `package.json` declares `"test": "node --test"` (set before this lane) | `test/smoke.test.mjs` › `__test exposes the stable pure-helper seam`; `the pure helpers behave as documented`; whole suite: `npm test` → 187 cases at 1.3.0 (see Evidence run) |
+| P1-8 — untestable pure helpers; no test script | Fixed | Host half split into `lib/patch.js` / `lib/search.js` / `lib/management.js`; `index.js` · `__test` exports the seams; `test/*.test.mjs` with `node --test`; `package.json` declares `"test": "node --test"` (set before this lane) | `test/smoke.test.mjs` › `__test exposes the stable pure-helper seam`; `the pure helpers behave as documented`; whole suite: `npm test` → 191 cases at 1.3.0 (see Evidence run) |
 | P1-9 — fail-open never self-heals | Fixed | `index.js` · `reconcile` sets `state.masked = false` in the catch and `true` only after a restriction install; `system-prompt/assemble` safety net tests `disclosures.get(agent)?.masked !== true`; failure log names the agent id and catalog size | `test/core.test.mjs` › `P1-9: a failed restriction install is retried by the assemble safety net`; `P1-9: a failed reconcile logs the agent id and the catalog size` |
 | P1-10 — PTC guidance branch is dead code | Fixed | `index.js` · `ptcRefusalGuidance` checks the result text (and the thrown message as fallback) for `run_code`; applied to result and error paths before returning/throwing | `test/core.test.mjs` › `P1-10: a PTC refusal returned as a result yields the guidance string` |
 | P1-11 — nested MCP dispatch missing from the session log | Fixed (revised after the core audit: logging it was a P0 history bug) | `index.js` · `mcp_call` passes **no** `log` to the nested `ctx.tools.execute`; `auditLine` (target + argument keys) is attached to every post-dispatch return path (a rare internal `ToolBatchExecutionError` still throws, thread intact); `projectContent` only replaces the result content when the nested call produced real text or an image block, so the empty-output fallback sentence survives (including whitespace-only content, F12) | `test/core.test.mjs` › `P1-11: mcp_call leaves a real Session history with no orphan tool result`; `P1-11: the nested call is always reported in the result audit line`; `F12: whitespace-only nested content keeps the no-output fallback` |
@@ -107,12 +107,12 @@ probes, migration verdict) is
 | Item | Status | What changed (file · function) | Regression evidence (test file › test name) |
 |---|---|---|---|
 | L1 — read the live status off the Loader entry | Fixed | `lib/management.js` · `liveStatusOf(entry)` (`entry.moduleNamespace.connectionStatusOf(entry.fiber?.ctx?.fiber ?? entry.fiber).current()` behind a `typeof` guard and `try/catch`, `null` on every failure), `sanitizeLiveStatus` (whitelisted fields, finite numbers, collapsed/bounded text), `collectServerRows` reads it per row | `test/management.test.mjs` › `sanitizeLiveStatus keeps only the documented fields and bounded text`; `the state route reports a reconnecting row as starting with its live detail` (normalizes to `fiber.ctx.fiber`, `onChangeCalls === 0`, a synthetic extra field cannot reach the payload); `a Loader entry without a usable live-status seam falls back cleanly (older DSH)`; `a throwing or empty live read falls back instead of failing the request` |
-| L2 — map the live states onto the public vocabulary | Fixed | `lib/management.js` · `liveStatusView` (`connected` → `running`/`idle` by the live `toolCount`, `connecting`/`reconnecting`/`waiting-credentials`/`closed` → `starting`, `failed` → `error`; detail text), `serverStatus` prefers the live view and only decides an enabled, non-unloading row; live `toolCount` wins over the prefix count | `test/management.test.mjs` › `liveStatusView maps every MCP state onto the public vocabulary and a one-line detail`; `serverStatus prefers the live status and keeps the inference when it is absent`; `a connected row is running or idle by the live tool count, which wins over the prefix count`; `a failed live status is an error and a disabled row stays stopped`; `serverStatus keeps the documented vocabulary, including stopping` (1.2.1 case, still green) |
+| L2 — map the live states onto the public vocabulary | Fixed | `lib/management.js` · `liveStatusView` (`connected` → `running`/`idle` by the live `toolCount`, `connecting`/`reconnecting`/`waiting-credentials`/`closed` → `starting`, `failed` → `error`; detail text), `serverStatus` prefers the live view and only decides an enabled, non-unloading row; live `toolCount` wins over the prefix count | `test/management.test.mjs` › `liveStatusView maps every MCP state onto the public vocabulary and a one-line detail`; `serverStatus prefers the live status and keeps the inference when it is absent`; `a connected row is running or idle by the live tool count, which wins over the prefix count`; `a failed live status is an error and a disabled row stays stopped`; `serverStatus keeps the documented vocabulary, including stopping` (1.2.1 case, still green); F3 fix with `F3: a failed fiber outranks a stale live cell` (failed fiber + live `closed` → `error`, no `— closed` in the model text) |
 | L3 — expose the status to the browser and the model | Fixed | `lib/management.js` · `presentServer` adds `live` and `statusDetail`; `renderServerList` appends the one-line detail to `mcp_servers` / `mcp_server` answers | `test/management.test.mjs` › `presentServer carries live and statusDetail without changing the rest of the contract`; `the model-facing text appends the live status detail`; `the mcp_server result text carries the live detail in its trailing list` |
-| L4 — render the detail without changing the vocabulary | Fixed | `client.js` · `liveOf`, `liveLabelOf` (reconnecting attempt/retry, waiting-credentials), `retryHintOf` (Host clock), `detailOf` (`statusDetail` first, `live` fallback; a connected/closed cell never explains a past error), `.dsh-mcp-card-detail`, tag `title` = label + detail | `test/client.test.mjs` › `a reconnecting starting row names the attempt and hints the retry`; `a starting row waiting for credentials says so`; `an error row shows the Host detail on the card and in the tag hint`; `an error row without a Host detail falls back to live.lastError`; `a detail that disappears between polls is removed cleanly`; `a running row without live data renders exactly as before`; `an older Host row without live/statusDetail fields still renders` |
-| L5 — keep the detail one bounded line | Fixed | `lib/management.js` · `DETAIL_ERROR_MAX_CHARS` (120) and `clip`; `LIVE_ERROR_MAX_CHARS` (240) in the payload | `test/management.test.mjs` › `the status detail clips a long lastError to one bounded line` (≤ 140 chars, no newline) |
+| L4 — render the detail without changing the vocabulary | Fixed | `client.js` · `liveOf`, `liveLabelOf` (reconnecting attempt/retry, waiting-credentials), `retryHintOf` (Host clock), `detailOf` (`statusDetail` first, `live` fallback; a connected/closed cell never explains a past error), `.dsh-mcp-card-detail`, tag `title` = label + detail | `test/client.test.mjs` › `a reconnecting starting row names the attempt and hints the retry`; `a starting row waiting for credentials says so`; `an error row shows the Host detail on the card and in the tag hint`; `an error row without a Host detail falls back to live.lastError`; `a detail that disappears between polls is removed cleanly`; `a running row without live data renders exactly as before`; `an older Host row without live/statusDetail fields still renders`; F6 fix with `a stopped or stopping row does not inherit a stale live failure detail`; `a stopped row still shows the statusDetail the Host sent` |
+| L5 — one bounded detail line, total over any cell | Fixed | `lib/management.js` · `DETAIL_ERROR_MAX_CHARS` (120) clips the `lastError` **segment** (the whole detail also carries the `failed:`/`reconnecting …` prefix; observed max ≈177), `LIVE_ERROR_MAX_CHARS` (240) in the payload, `lastErrorSegment` renders only primitives so a hand-built object cannot throw | `test/management.test.mjs` › `the status detail clips a long lastError to one bounded line` (≤ 140 chars for that input, no newline); `F5: a hand-built non-string lastError cannot make the detail throw` |
 | L6 — read-only, no subscription, no write | Fixed | `lib/management.js` · `liveStatusOf` only calls `current()`; there is no `onChange` call anywhere and no write path is touched by a read | `test/management.test.mjs` › `reading live status never reaches a write path` (no `setPluginEnabled`, patch bytes unchanged); the live fixtures' `onChange` throws and the route test asserts it is never called |
-| L7 — capability and real-runtime evidence | Fixed | `scripts/probe-live-status.mjs` (capability gate) asserts A–D against a real Cordis Loader and the installed `@deepseek-ai/dsh-mcp-client`: `typeof entry.moduleNamespace.connectionStatusOf === 'function'` on every MCP row and `liveStatusOf()` reads both; a broken command ends `failed`/`ENOENT`, presented as `error` with the spawn text in `statusDetail`; a real mini stdio server ends `connected` with `toolCount >= 2`, presented as `running` with no detail; `collectServerRows` creates no `onChange` subscription. `scripts/live-boot.mjs` (behavioural gate) declares `mcp-probe-broken` / `mcp-probe-ok` and probes `/state`: `state-live-broken` requires `status: error`, `live.state: failed` and `statusDetail` containing `ENOENT` (the row's `fiberPhase` is `active` — inference alone would have said `idle`); `state-live-connected` requires `status: running`, `live.state: connected`, `live.toolCount: 2` and `statusDetail: null` | `node scripts/probe-live-status.mjs` → 8/8 assertions `PASS` (`--json` carries the observed rows); `node scripts/live-boot.mjs` → `PASS (11/11)`, live rows settled in ≈65 ms. Both report a skip — never a pass — without the runtime (probe) or real Loader rows (`live-boot --expect baseline` / fallback). Suite-level fixture coverage of the same paths is L1–L6 above; commands and expected matrix in [test/README.md](../test/README.md) → *The gates* |
+| L7 — capability and real-runtime evidence | Fixed | `scripts/probe-live-status.mjs` (capability gate) asserts A–D against a real Cordis Loader and the installed `@deepseek-ai/dsh-mcp-client`: `typeof entry.moduleNamespace.connectionStatusOf === 'function'` on every MCP row and `liveStatusOf()` reads both; a broken command ends `failed`/`ENOENT`, presented as `error` with the spawn text in `statusDetail`; a real mini stdio server ends `connected` with `toolCount >= 2`, presented as `running` with no detail; `collectServerRows` creates no `onChange` subscription. `scripts/live-boot.mjs` (behavioural gate) declares `mcp-probe-broken` / `mcp-probe-ok` and probes `/state`: `state-live-broken` requires `status: error`, `live.state: failed` and `statusDetail` containing `ENOENT` (the row's `fiberPhase` is `active` — inference alone would have said `idle`); `state-live-connected` requires `status: running`, `live.state: connected`, `live.toolCount: 2` and `statusDetail: null` | `node scripts/probe-live-status.mjs` → `PASS (8/8 assertions)`; a failed run prints its verdict, quiesces the rows, removes the temp home and exits 1 through its own code (`--json` adds `exitCode`/`cleanup`/`signals`; `PROBE_LIVE_FORCE_FAIL=1` is the negative self-test); `node scripts/live-boot.mjs` → `PASS (11/11)`, live rows settled in ≈65 ms with `--json` `skipsNotEvidence`/`authority`. Skips are printed and counted separately: a run that needed one exits 0 where CI/fallback require it, but its verdict is not the authoritative gate (fallback: `PASS (9/11, 2 skipped — fallback/no runtime: skips are not evidence)`). Suite-level fixture coverage of the same paths is L1–L6 above; commands and expected matrix in [test/README.md](../test/README.md) → *The gates* |
 
 Not changed in 1.3.0 (recorded, so a reviewer does not look for it):
 
@@ -129,20 +129,20 @@ Environment: this worktree (1.3.0), Node v25.8.0, macOS, unpacked runtime presen
 
 ```
 $ npm test                      # unpacked runtime present, MCP_REVIEW_CATALOG unset
-ℹ tests 187
-ℹ pass 184
+ℹ tests 191
+ℹ pass 188
 ℹ fail 0
 ℹ skipped 3
 
 $ MCP_REVIEW_CATALOG=<review catalog> npm test
-ℹ tests 187
-ℹ pass 187
+ℹ tests 191
+ℹ pass 191
 ℹ fail 0
 ℹ skipped 0
 
 $ DSH_RUNTIME=/nonexistent npm test      # what CI runs (no runtime, no catalog)
-ℹ tests 187
-ℹ pass 166
+ℹ tests 191
+ℹ pass 170
 ℹ fail 0
 ℹ skipped 21
 ```
@@ -150,7 +150,7 @@ $ DSH_RUNTIME=/nonexistent npm test      # what CI runs (no runtime, no catalog)
 The 3 cases skipped in the default local posture are the real-catalog schema cases; they only
 run when `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (private,
 not committed). The 21 CI skips are those 3 plus the 18 runtime-dependent cases. The 1.3.0
-live-status cases run in every posture (the live fixtures need no runtime).
+live-status and audit-fix cases run in every posture (their fixtures need no runtime).
 
 ```
 $ node scripts/repro-review.mjs
@@ -160,15 +160,17 @@ $ node scripts/repro-review.mjs
   ok  client  S11 — a failed panel action is cleared by the next poll
   ok  search  S9 — the catalog search is AND-shaped and case-sensitive
   ok  fullSchema  S10 — `detail:"full"` prints an invalid JSON schema
-  0/6 defect families reproduced (6 evaluated, 0 skipped)
-  PASS — no reviewed defect reproduces (regression gate)
+  0/6 defect families reproduced (6/6 evaluated)
+  PASS — no reviewed defect reproduces (6/6 evaluated) (regression gate)
 $ echo $?
 0
 ```
 
 Without the DSH runtime the YAML family prints `skip` (the platform insert/override rule
-cannot be stubbed honestly), `5 evaluated, 1 skipped`, and the gate still exits 0 when
-nothing reproduces.
+cannot be stubbed honestly), the verdict reads
+`(5/6 evaluated, 1 skipped — skips are not evidence)` on both the reproduced and the PASS line,
+and the gate still exits 0 when nothing reproduces; `--json` carries `skipsNotEvidence: true` /
+`authority: false`, so a skipped run is not the six-family gate.
 
 ```
 $ node scripts/live-boot.mjs        # default --expect fixed, real boot
@@ -186,9 +188,9 @@ $ node scripts/live-boot.mjs        # default --expect fixed, real boot
   ok  state-live-connected     status=200  expected=200
         row: status=running fiberPhase=active live={"state":"connected","toolCount":2,"connectedAt":<run ms>} toolCount=2 statusDetail=null
 
-  live rows settled: yes (waited 64 ms)
+  live rows settled: yes (waited 71 ms)
 
-  PASS  (11/11, 1530 ms)
+  PASS  (11/11)  (1959 ms)
 ```
 
 `live-boot` also snapshots both patch layers before and after the probes and fails unless
@@ -196,8 +198,12 @@ they are byte-identical: every rejected probe changed nothing. The two live prob
 behaviour end to end: `state-live-broken` reads `error` / `live.state: failed` with the spawn
 error in `statusDetail` even though the row's `fiberPhase` is `active` (inference alone would
 have reported `idle`), and `state-live-connected` reads `running` / `connected` with
-`toolCount: 2` and no detail. `--expect baseline` and the no-runtime fallback report both live
-probes as `skip` — a skip is never counted as a pass.
+`toolCount: 2` and no detail. In `--expect baseline` and in the no-runtime fallback both live
+probes are `skip`; the fallback verdict then reads
+`PASS (9/11, 2 skipped — fallback/no runtime: skips are not evidence)` and `--json` carries
+`skipsNotEvidence: true` / `authority: false`. A skip is printed and counted separately: a run
+that needed one exits 0 where CI/fallback require it, but its verdict is not the authoritative
+gate.
 
 ```
 $ node scripts/probe-live-status.mjs
@@ -209,28 +215,52 @@ $ node scripts/probe-live-status.mjs
   PASS  B. broken row: status error and the spawn text in statusDetail
   PASS  C. real row: live connected with toolCount >= 2
   PASS  C. real row: status running with toolCount 2 and no detail
+
+  cleanup: quiesced yes (0 ms, states failed/connected); disposed 2; skipped 0;
+  servers 99899:process already gone, 99901:process already gone; spawned reaped 0;
+  temp removed yes
+
+  PASS  (8/8 assertions)
 ```
 
 `probe-live-status` is the capability gate: it needs no HTTP stack, and it exits 0 only when
-all eight assertions pass. Without the DSH runtime it prints `SKIP: runtime unavailable` (with
-the missing packages) and exits 0, so a runtime-less checkout stays green; `--json` marks
-`skipped: true` and carries the observed rows. Both scripts are release gates, not suite cases.
+all eight assertions pass. A failed run exits **1 through its own code**, not 143: cleanup
+quiesces the rows before disposing, reaps the servers it spawned, removes the temp home and
+records an arriving `SIGTERM` (`--json` adds `exitCode`, `cleanup`, `signals`). Verified with
+the hidden negative self-test:
+
+```
+$ PROBE_LIVE_FORCE_FAIL=1 node scripts/probe-live-status.mjs
+  ERROR: PROBE_LIVE_FORCE_FAIL=1: assertion A forced to fail before the rows settle (negative self-test)
+  FAIL  A. entry.moduleNamespace.connectionStatusOf is a function
+  cleanup: quiesced yes (128 ms, states failed/connected); disposed 2; skipped 0; …
+  FAIL  (0/1 assertions)
+$ echo $?
+1        # temp home removed; no leaked dsh-live-status-probe-* directory
+```
+
+Without the DSH runtime it prints `SKIP: runtime unavailable` (with the missing packages) and
+exits 0, so a runtime-less checkout stays green; the printed line says the skip is **not
+evidence** and `--json` marks `skipped: true` / `authority: false`. Both probe and live-boot are
+release gates, not suite cases.
 
 Gate semantics: `repro-review`'s default `--expect fixed` is the regression gate (exit 0 = no
 reviewed defect reproduces); `--expect baseline` is the historical 1.2.0 evidence mode and
 only passes on a `v1.2.0` checkout. `live-boot`'s default `--expect fixed` is the real-platform
 behavioural gate (real DSH boot, `node:http` so `Host` is sent, real cookie, 11 probes); its
 `--expect baseline` only matches `v1.2.0` and reports the two live probes as `skip`, as does the
-no-runtime fallback — a skip never counts as a pass. `probe-live-status` is the capability gate
-(no HTTP stack) and has no baseline mode. The `repro-review` and `live-boot` gates were checked
+no-runtime fallback; those verdicts count skips separately and are not authoritative
+(`skipsNotEvidence`/`authority` in `--json`). `probe-live-status` is the capability gate (no
+HTTP stack) and has no baseline mode. The `repro-review` and `live-boot` gates were checked
 against the `v1.2.0` tag in both directions by the regression lane: on `v1.2.0` the baseline
 modes pass and the fixed modes fail, and on this release the reverse.
 
 ## Independent audits (2026-11-19)
 
-Two adversarial audits were run against this release candidate (`audit-core-docs.md`,
-`audit-security.md`); their findings drove the final code and the corrections in this file.
-Statuses are for this tree.
+Two adversarial audits were run against the 1.2.1 release candidate (`audit-core-docs.md`,
+`audit-security.md`), and one against the 1.3.0 live-status change
+(`audit-1.3-live-status.md`); their findings drove the final code and the corrections in this
+file. Statuses are for this tree.
 
 ### Core audit — verdict at review time: **do-not-ship** (F1); fixed in this release
 
@@ -260,3 +290,25 @@ Statuses are for this tree.
 | F7 — `observedStatus` after a start could read “idle” | P3 | Fixed — post-operation re-read counts the live tool catalog | `test/management.test.mjs` › `F7: a started server reports the freshly observed tool count, not "idle"` |
 | F8 — `readJsonBody` ignored a client disconnect | P3 | Fixed — `close`/`aborted` reject with an `AbortError` | `test/management.test.mjs` › `F8: a client disconnect mid-body rejects the read and never reaches the manager`; `F8: readJsonBody rejects with an AbortError on a premature close` |
 | F9 — doc nit: `-pSECRET → -p` over-stated what is shown | P3 | Fixed — `docs/security.md` §3 now says such an argument is omitted | docs-only |
+
+### 1.3 review — verdict: **ship-with-notes** (commit audited `f523da1`)
+
+Independent adversarial pass over the merged 1.3.0 live-status change
+(`dsh-mcp-progressive-review/2026-11-19/audit-1.3-live-status.md`): final code and vendored
+runtime read, every gate run, throwaway probes for the seam/fallback/client/install. Reviewer's
+gate numbers at `f523da1`: 187 tests (184 pass / 3 skip), 187/0 with the catalog, 166/21 CI;
+`repro-review` `0/6` PASS; `live-boot` `PASS (11/11)`, live rows settled in 66 ms;
+`probe-live-status` 8 assertions PASS; pinned-sha `npm pack` resolved to 1.3.0 while `#v1.3.0`
+did not yet exist. Findings:
+
+| Finding | Severity | Status | Regression / evidence |
+|---|---|---|---|
+| F1 — the documented `#v1.3.0` install spec did not resolve; the CHANGELOG said the tag was already published | High (release step) | Operational — tag before announce; release notes record the pinned commit, no sha claimed in the repo | `git ls-remote --tags origin` / `npm pack #v1.3.0` (audit §7) |
+| F2 — capability gate failed by SIGTERM (143) in cleanup, leaking its temp home | Medium | Fixed — cleanup quiesces, leaves mid-spawn rows undisposed, reaps children, removes the temp home, exits 1; `PROBE_LIVE_FORCE_FAIL=1` self-test | `PROBE_LIVE_FORCE_FAIL=1 node scripts/probe-live-status.mjs` → exit 1, no leaked temp dir (`docs/security.md` §7.3) |
+| F3 — a live cell outranked a failed fiber (`starting — closed`) | Low | Fixed — `liveStatusView` returns null on `fiberPhase === 'failed'`; inference reports `error` + diagnostic | `test/management.test.mjs` › `F3: a failed fiber outranks a stale live cell` |
+| F4 — "a skip is never a pass" contradicted gates printing PASS / exit 0 | Low (wording/semantics) | Fixed — verdicts count skips separately; `skipsNotEvidence`/`authority` in `--json` | gate outputs in *Evidence run* |
+| F5 — non-string `lastError` with a throwing `toString` threw the detail builder | Info | Fixed — `lastErrorSegment` renders primitives only | `test/management.test.mjs` › `F5: a hand-built non-string lastError cannot make the detail throw` |
+| F6 — panel derived a live failure detail for a `stopped` row | Info | Fixed — client live fallback gated on `starting`/`error`/`running`/`idle`; Host `statusDetail` still renders on any status | `test/client.test.mjs` › `a stopped or stopping row does not inherit a stale live failure detail`; `a stopped row still shows the statusDetail the Host sent` |
+| F7 — `package-lock.json` still recorded 1.2.0 | Info | Non-issue — the lock is untracked/gitignored, not in the tarball, not read by CI | audit §7 |
+| F8 — "120 in `statusDetail`" described the error segment, not the whole line | Info | Fixed in docs — 120-char `lastError` segment; whole detail bounded by the reason prefix too (observed max ≈177) | `docs/architecture.md` §3, `docs/security.md` §3.1 |
+| R1 — upstream SDK `StdioClientTransport._dispose()` can signal the caller's process group when disposing mid-spawn | High impact, pre-existing | Documented residual — not introduced by 1.3.0; the gate quiesces, the plugin's Stop/Restart is platform-owned, end-to-end impact unverified | `docs/security.md` §8; audit §R1 |

@@ -8,13 +8,13 @@ Five artefacts live here:
 | `test/smoke.test.mjs` | the regression suite (`node:test` + `node:assert/strict`) | yes |
 | `scripts/repro-review.mjs` | review-defect regression gate (default); historical 1.2.0 evidence with `--expect baseline` | no (release gate; its YAML family needs the runtime) |
 | `scripts/live-boot.mjs` | real-platform behavioural gate: 9 HTTP probes plus, as of 1.3.0, `state-live-broken` / `state-live-connected` against two real MCP loader rows (11/11 in `--expect fixed`) | no (it boots a server) |
-| `scripts/probe-live-status.mjs` | capability gate for the Loader-entry live-status seam (1.3.0): assertions A–D against a real Loader; fails when DSH stops exposing the seam | no (real Loader in a temp dir; no server) |
+| `scripts/probe-live-status.mjs` | capability gate for the Loader-entry live-status seam (1.3.0): assertions A–D against a real Loader; exits 1 on failure (cleanup quiesces, reaps its servers, removes its temp home), `PROBE_LIVE_FORCE_FAIL=1` self-test | no (real Loader in a temp dir; no server) |
 
 ## How to run
 
 ```sh
 npm install --no-audit --no-fund     # once; the only dependency is `yaml`
-npm test                             # the suite (187 tests; CI's gate)
+npm test                             # the suite (191 tests; CI's gate)
 
 node scripts/repro-review.mjs        # review-defect gate: exit 0 = no reviewed defect reproduces
 node scripts/repro-review.mjs --json # the same, machine readable
@@ -33,9 +33,9 @@ The three real-catalog schema cases are optional and private: point
 
 | Posture | `npm test` |
 | --- | --- |
-| unpacked runtime present, `MCP_REVIEW_CATALOG` unset (default local) | 187 tests, 184 pass / 3 skip / 0 fail |
-| unpacked runtime present, `MCP_REVIEW_CATALOG` set | 187 tests, 187 pass / 0 skip / 0 fail |
-| CI: no runtime, no catalog | 187 tests, 166 pass / 21 skip / 0 fail |
+| unpacked runtime present, `MCP_REVIEW_CATALOG` unset (default local) | 191 tests, 188 pass / 3 skip / 0 fail |
+| unpacked runtime present, `MCP_REVIEW_CATALOG` set | 191 tests, 191 pass / 0 skip / 0 fail |
+| CI: no runtime, no catalog | 191 tests, 170 pass / 21 skip / 0 fail |
 
 `npm test` is the gate CI runs. The three scripts are release gates run locally: `repro-review`
 needs the unpacked DSH runtime for its YAML family, `live-boot` boots a real server, and
@@ -59,8 +59,10 @@ review and:
   (untrusted `Host` → `403`, no cookie → `401`). The real-platform authority is
   `scripts/live-boot.mjs`, which boots the app and uses the platform's own fence;
 * reports the YAML family as `skip` with its reason when the DSH runtime is absent (the
-  platform insert/override rule cannot be stubbed honestly) — a skip is never a pass, and
-  the gate still exits 0 when nothing reproduces.
+  platform insert/override rule cannot be stubbed honestly). A skip is printed and counted
+  separately: the gate still exits 0 when nothing reproduces, but the verdict is not the
+  six-family gate — it reads `(5/6 evaluated, 1 skipped — skips are not evidence)` and `--json`
+  carries `skipsNotEvidence: true` / `authority: false`.
 
 `--expect baseline` is the historical 1.2.0 evidence mode: it exits 0 only when all six
 families reproduce, so it passes on a `v1.2.0` checkout and reports `NOT A 1.2.0 CHECKOUT`
@@ -106,9 +108,12 @@ have called it `idle`), and `state-live-connected` requires `status: "running"`,
 `live.state: "connected"`, `live.toolCount: 2` and `statusDetail: null`. That exercises the
 Loader-entry seam against a real client, not only against fixtures; on this tree the gate is
 `PASS (11/11)`. `--expect baseline` reports the two live probes as `skip` (a 1.2.0 row carries no
-live status), and the fallback mode skips them too because it has no real Loader row — a skip is
-never counted as a pass. `--json` carries each probe's `row`/`skipped`, plus the top-level
-`liveWait` (the row-settling wait).
+live status), and the fallback mode skips them too because it has no real Loader row. Skips are
+printed and counted separately: a run that needed one exits 0 where CI/fallback require it, but
+its verdict is not the authoritative gate — the fallback prints
+`PASS (9/11, 2 skipped — fallback/no runtime: skips are not evidence)` and `--json` carries
+`skipsNotEvidence: true` / `authority: false`, alongside each probe's `row`/`skipped` and the
+top-level `liveWait` (the row-settling wait).
 
 If the DSH runtime is not installed the script falls back to a minimal real HTTP server that
 mounts the plugin's own route handlers and says so in its result: `"mode": "fallback-http"`,
@@ -133,11 +138,18 @@ MCP server) inside a `mkdtemp` home, and asserts:
 * **D** — `collectServerRows` creates no `onChange` subscription (the public `onChange` is
   instrumented before the read, and the client's own observer set is checked when readable).
 
-All eight assertions must pass for exit 0. Without the DSH runtime the script prints
-`SKIP: runtime unavailable` (plus the missing packages) and exits 0, so a runtime-less checkout
-stays green — the skip is explicit and `--json` marks `skipped: true`; a skip is never a quiet
-pass. It is the "DSH renamed the seam" alarm: run it on every DSH upgrade, not only on plugin
-releases.
+All eight assertions must pass for exit 0. A failed run prints the verdict and exits **1
+through its own code**, never 143: cleanup quiesces the rows (bounded) before disposing, leaves a
+row that is still mid-spawn undisposed, reaps the server children it created, removes the temp
+home and records an in-process `SIGTERM` rather than letting it decide the exit — `--json` adds
+`exitCode`, `cleanup` and `signals`. The hidden `PROBE_LIVE_FORCE_FAIL=1` knob exercises that
+negative path without editing an assertion; on this tree it prints
+`ERROR: PROBE_LIVE_FORCE_FAIL=1: assertion A forced to fail …`, `FAIL (0/1 assertions)`, exits 1
+and leaves no `dsh-live-status-probe-*` directory behind (`PROBE_LIVE_QUIESCE_MS` shortens the
+settle wait). Without the DSH runtime the script prints `SKIP: runtime unavailable` (plus the
+missing packages) and exits 0, so a runtime-less checkout stays green — the printed line says the
+skip is **not evidence**, and `--json` marks `skipped: true` / `authority: false`. It is the
+"DSH renamed the seam" alarm: run it on every DSH upgrade, not only on plugin releases.
 
 ## What the suite covers
 
@@ -191,6 +203,12 @@ releases.
     detail falls back to live.lastError`, `a detail that disappears between polls is removed
     cleanly`, `a running row without live data renders exactly as before`, `an older Host row
     without live/statusDetail fields still renders`).
+  * the 1.3 audit fixes: a failed fiber outranks a stale live cell (`F3: a failed fiber outranks
+    a stale live cell`), a non-string `lastError` cannot throw the detail builder (`F5: a
+    hand-built non-string lastError cannot make the detail throw`), and the panel keeps a
+    stopped/stopping row free of a stale live failure detail while a Host `statusDetail` still
+    renders (`a stopped or stopping row does not inherit a stale live failure detail`, `a
+    stopped row still shows the statusDetail the Host sent`).
 
 ## The three worlds in `test/harness.mjs`
 
@@ -231,15 +249,19 @@ CI has no DSH runtime, so:
 
 * 18 runtime-dependent cases call `t.skip()` when `hasRuntime()` is false, and the 3
   real-catalog schema cases skip unless `MCP_REVIEW_CATALOG` names a local copy of the
-  private review catalog. Locally with the runtime present that is 184 pass / 3 skip
-  (187 pass / 0 skip with the variable set); on CI, which has neither, it is 166 pass /
-  21 skip. The live-status cases are not skipped anywhere: their live fixtures are pure JS.
+  private review catalog. Locally with the runtime present that is 188 pass / 3 skip
+  (191 pass / 0 skip with the variable set); on CI, which has neither, it is 170 pass /
+  21 skip. The live-status and audit-fix cases are not skipped anywhere: their fixtures are
+  pure JS.
 * `scripts/repro-review.mjs` is not part of `npm test`; its YAML family also skips when the
   DSH runtime is absent, and the script is a release gate, not a suite case.
 * `scripts/live-boot.mjs` and `scripts/probe-live-status.mjs` are not part of `npm test` — one
   boots a server and both need the unpacked runtime/real Loader, so they stay release gates.
   Without the runtime, `live-boot` falls back and reports its two live probes as `skip`, and
-  `probe-live-status` prints `SKIP: runtime unavailable` and exits 0; a skip is never a pass.
+  `probe-live-status` prints `SKIP: runtime unavailable` and exits 0. Both mark those runs as
+  non-authoritative (`skipsNotEvidence`/`authority`; the probe's printed line says the skip is
+  not evidence): a skip is printed and counted separately, and a run that needed one is not the
+  authoritative gate even though it exits 0 where CI/fallback require it.
 * the control-queue *timeout* case uses `withVirtualClock()`, which advances `Date.now()` by
   a fixed step per call: the plugin's fixed `SERVER_WAIT_MS = 30000` deadline is then
   reached in ~0.6 s of real time. It is in the suite (it asserts a `500`, not a timing), but
