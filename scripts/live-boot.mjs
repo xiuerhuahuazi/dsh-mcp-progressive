@@ -49,6 +49,11 @@
  * as `skip` there: rows carry no `live` field and 1.3's loader-row additions
  * cannot exist in 1.2.0, so asserting them would be dishonest rather than
  * informative. They are skipped in fallback mode too (no real Loader rows).
+ * A skipped probe is printed and counted separately, and a run that skips any
+ * probe still exits 0 when its remaining assertions hold (CI and fallback rely
+ * on that) but its verdict is not the platform gate: the summary line counts it
+ * (`PASS (9/11, 2 skipped — fallback/no runtime: skips are not evidence)`) and
+ * `--json` carries `skipsNotEvidence: true` / `authority: false`.
  *
  * Usage: node scripts/live-boot.mjs [--expect fixed|baseline] [--port N] [--json] [--keep]
  *
@@ -758,6 +763,11 @@ async function main() {
       })
     }
     result.skipped = result.probes.filter((entry) => entry.skipped === true).length
+    // A skip is printed and counted separately: it never counts as a pass, and
+    // a verdict that needed one is not the real-platform gate (CI/fallback
+    // still exit 0, so the machine-readable result says so explicitly).
+    result.skipsNotEvidence = result.skipped > 0
+    result.authority = result.mode === 'real-dsh-web' && result.skipped === 0
     result.ok = result.probes.every((entry) => entry.skipped === true || entry.ok) && result.patchesUnchanged
   } catch (error) {
     result.error = error?.message ?? String(error)
@@ -827,7 +837,9 @@ async function main() {
       console.log('\n  FAIL  a rejected toggle mutated a patch file (snapshot differs)')
       console.log(`        files: ${result.patchFiles.join(', ')}`)
     }
-    console.log(`\n  ${result.ok ? 'PASS' : 'FAIL'}  (${result.durationMs} ms)\n`)
+    const passed = result.probes.filter((entry) => entry.skipped !== true && entry.ok === true).length
+    const counted = result.skipped > 0 ? `, ${result.skipped} skipped — fallback/no runtime: skips are not evidence` : ''
+    console.log(`\n  ${result.ok ? 'PASS' : 'FAIL'}  (${passed}/${result.probes.length}${counted})  (${result.durationMs} ms)\n`)
   }
 
   process.exit(result.ok ? 0 : 1)
