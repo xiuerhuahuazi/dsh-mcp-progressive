@@ -45,6 +45,7 @@ window.__ModuleLoader__.load({
         stopping: 'Stopping…',
         restarting: 'Restarting…',
         switchLabel: 'MCP server availability',
+        'hazard.starting': 'Wait for the server to finish starting before stopping or restarting it',
         'action.done': 'Done',
         'action.restartRequired': 'Saved — restart DeepSeek Harness to apply',
         'action.overridden': 'Saved, but a higher-priority layer overrides it',
@@ -82,6 +83,7 @@ window.__ModuleLoader__.load({
         stopping: '停止中…',
         restarting: '重启中…',
         switchLabel: 'MCP 服务器可用性',
+        'hazard.starting': '启动完成后再停止或重启',
         'action.done': '已完成',
         'action.restartRequired': '已保存，需重启 DeepSeek Harness 后生效',
         'action.overridden': '已保存，但被更高优先级的层覆盖',
@@ -307,6 +309,24 @@ window.__ModuleLoader__.load({
       return live !== null && typeof live === 'object' ? live : null
     }
 
+    /**
+     * Whether stopping or restarting this row could dispose a transport that is
+     * still spawning its version-negotiation sibling.
+     *
+     * The upstream stdio transport aborts that sibling without waiting for its
+     * spawn to finish; a child with no pid yet forwards the kill to pid 0, i.e.
+     * the caller's whole process group (audit R1). A Stop/Restart landing in
+     * that window can therefore signal the Host itself. Only a Host status of
+     * `starting` sits in the window, and only a `closed` live cell proves the
+     * transport already settled — a missing `live` falls back to the cautious
+     * reading. Every other status is out of the window.
+     */
+    function spawnHazard(server) {
+      if (server === null || typeof server !== 'object' || server.status !== 'starting') return false
+      const live = liveOf(server)
+      return live === null || live.state !== 'closed'
+    }
+
     /** One dictionary string with its `{name}` placeholders filled in. */
     function fillTemplate(text, values) {
       return text.replace(/\{(\w+)\}/g, (match, name) =>
@@ -508,24 +528,39 @@ window.__ModuleLoader__.load({
             ? fillTemplate(t('tagTitlePlain'), { label })
             : fillTemplate(t('tagTitle'), { label, detail: tagHint })
           const name = serverLabel(server)
+          // A row that may still be spawning keeps both controls disabled: the
+          // disposal behind Stop/Restart can signal the Host's process group
+          // (see `spawnHazard`). A pending action already wins ("busy"), so the
+          // reason only rides along while nothing else is disabling the row.
+          const hazard = spawnHazard(server) && !busy
+          const hazardHint = hazard ? t('hazard.starting') : null
+          const restartLabel = hazardHint === null ? t('restart') + ' ' + name : t('restart') + ' ' + name + ' — ' + hazardHint
+          const switchLabel = hazardHint === null ? t('switchLabel') + ' ' + name : t('switchLabel') + ' ' + name + ' — ' + hazardHint
           const restartButton = h('button', {
             type: 'button',
             className: 'dsh-mcp-icon-btn',
-            disabled: busy,
-            title: t('restart') + ' ' + name,
-            'aria-label': t('restart') + ' ' + name,
-            onClick: () => act(server, 'restart'),
+            disabled: busy || hazard,
+            title: restartLabel,
+            'aria-label': restartLabel,
+            onClick: () => {
+              if (hazard) return
+              act(server, 'restart')
+            },
           }, restartGlyph())
           const switchButton = h('button', {
             type: 'button',
             role: 'switch',
             className: 'dsh-mcp-switch',
-            disabled: busy,
+            disabled: busy || hazard,
             'aria-checked': server.enabled ? 'true' : 'false',
             // The accessible name names the setting (this server), not the action
             // that the next click would perform; aria-checked carries the state.
-            'aria-label': t('switchLabel') + ' ' + name,
-            onClick: () => act(server, server.enabled ? 'stop' : 'start'),
+            'aria-label': switchLabel,
+            title: hazard ? switchLabel : undefined,
+            onClick: () => {
+              if (hazard) return
+              act(server, server.enabled ? 'stop' : 'start')
+            },
           }, h('span', { className: 'dsh-mcp-switch-thumb', 'aria-hidden': 'true' }))
           return h('li', { key, className: 'dsh-mcp-card', 'data-state': stateKey },
             h('div', { className: 'dsh-mcp-card-head' },

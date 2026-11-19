@@ -481,13 +481,22 @@ test('an older Host row without live/statusDetail fields still renders', async (
 })
 
 test('a reconnecting starting row names the attempt and hints the retry', async () => {
-  const row = serverRow({
+  const reconnecting = serverRow({
     status: 'starting',
     toolCount: 0,
     live: { state: 'reconnecting', attempt: 2, maxAttempts: 5, nextRetryAtMs: 3001 },
   })
-  const fetch = async (url, init) =>
-    response(stateBody([row], init !== undefined && init.method === 'POST' ? { now: 3001 } : { now: 1 }))
+  const running = serverRow({ entryId: 'include:busy', id: 'busy', serverName: 'busy', target: 'node busy.js' })
+  const rows = [reconnecting, running]
+  const releases = []
+  const fetch = (url, init) => {
+    if (init !== undefined && init.method === 'POST') {
+      return new Promise((resolve) => {
+        releases.push(() => resolve(response(stateBody(rows, { now: 3001 }))))
+      })
+    }
+    return Promise.resolve(response(stateBody(rows, { now: 1 })))
+  }
   const mounted = mountPanel({ fetch })
   try {
     await flushMicrotasks()
@@ -502,12 +511,16 @@ test('a reconnecting starting row names the attempt and hints the retry', async 
     assert.equal(detail.props.title, 'retry in 3s')
     assert.equal(String(tag.props.title), 'status: reconnecting (attempt 2/5) — retry in 3s')
 
-    // An in-flight action keeps its own verb; only the settled state speaks live.
-    const pending = toggleButton(tree).props.onClick()
-    assert.equal(textOf(byClass(mounted.panel.render(), 'dsh-mcp-tag')), 'Stopping…')
+    // The reconnect row may still be spawning, so its switch is blocked; an
+    // in-flight action over a settled row keeps its own verb ("Stopping…").
+    const toggles = findAll(tree, (node) => node.props && node.props.role === 'switch')
+    assert.equal(toggles[0].props.disabled, true)
+    const pending = toggles[1].props.onClick()
+    assert.equal(textOf(allByClass(mounted.panel.render(), 'dsh-mcp-tag')[1]), 'Stopping…')
+    for (const release of releases) release()
     await pending
     await flushMicrotasks()
-    assert.equal(textOf(byClass(mounted.panel.render(), 'dsh-mcp-tag')), 'reconnecting (attempt 2/5)')
+    assert.equal(textOf(allByClass(mounted.panel.render(), 'dsh-mcp-tag')[1]), 'running')
   } finally {
     mounted.panel.unmount()
   }
@@ -656,6 +669,214 @@ test('a stopped row still shows the statusDetail the Host sent', async () => {
     assert.equal(textOf(detail), statusDetail)
     assert.equal(String(tag.props.title), 'status: stopped — ' + statusDetail)
     assert.doesNotMatch(textOf(tree), /stale X/)
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+const HAZARD_HINT = 'Wait for the server to finish starting before stopping or restarting it'
+
+/** Collect POST bodies made through `fetch` (any method/URL). */
+function recordingFetch(rows) {
+  const posts = []
+  const fetch = async (url, init) => {
+    if (init !== undefined && init.method === 'POST') {
+      posts.push({ url, body: JSON.parse(init.body) })
+      return response(stateBody(rows))
+    }
+    return response(stateBody(rows))
+  }
+  return { posts, fetch }
+}
+
+test('a starting row disables stop and restart and explains why', async () => {
+  const row = serverRow({ status: 'starting', toolCount: 0, live: { state: 'connecting', attempt: 0 } })
+  const { posts, fetch } = recordingFetch([row])
+  const mounted = mountPanel({ fetch })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const toggle = toggleButton(tree)
+    const restart = restartButton(tree)
+
+    assert.equal(toggle.props.disabled, true, 'the switch must not stop a spawning row')
+    assert.equal(restart.props.disabled, true, 'restart must not dispose a spawning row')
+    assert.match(String(toggle.props.title), new RegExp(HAZARD_HINT))
+    assert.match(String(toggle.props['aria-label']), new RegExp(HAZARD_HINT))
+    assert.match(String(restart.props.title), new RegExp(HAZARD_HINT))
+    assert.match(String(restart.props['aria-label']), new RegExp(HAZARD_HINT))
+
+    // The row itself still reads as "starting"; only the controls are blocked.
+    assert.equal(textOf(byClass(tree, 'dsh-mcp-tag')), 'starting')
+    assert.equal(toggle.props['aria-checked'], 'true')
+
+    // An activation that reaches the disabled control must not hit the wire.
+    await toggle.props.onClick()
+    await restart.props.onClick()
+    await flushMicrotasks()
+    assert.deepEqual(posts, [], 'a blocked control must never POST')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('the starting hazard hint is localized', async () => {
+  const row = serverRow({ status: 'starting', live: { state: 'connecting' } })
+  const mounted = mountPanel({ locale: { active: 'zh' }, fetch: async () => response(stateBody([row])) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const toggle = toggleButton(tree)
+    const restart = restartButton(tree)
+    assert.equal(toggle.props.disabled, true)
+    assert.equal(restart.props.disabled, true)
+    assert.match(String(toggle.props.title), /启动完成后再停止或重启/)
+    assert.match(String(toggle.props['aria-label']), /启动完成后再停止或重启/)
+    assert.match(String(restart.props.title), /启动完成后再停止或重启/)
+    assert.match(String(restart.props['aria-label']), /启动完成后再停止或重启/)
+    assert.equal(textOf(byClass(tree, 'dsh-mcp-tag')), '启动中')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('reconnecting and waiting-credentials starting rows are blocked too', async () => {
+  const rows = [
+    serverRow({
+      entryId: 'include:retry',
+      id: 'retry',
+      serverName: 'retry',
+      status: 'starting',
+      live: { state: 'reconnecting', attempt: 2, maxAttempts: 5, nextRetryAtMs: 3001 },
+    }),
+    serverRow({
+      entryId: 'include:creds',
+      id: 'creds',
+      serverName: 'creds',
+      status: 'starting',
+      live: { state: 'waiting-credentials', lastError: 'missing ${credential:token}' },
+    }),
+  ]
+  const mounted = mountPanel({ fetch: async () => response(stateBody(rows)) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const toggles = findAll(tree, (node) => node.props && node.props.role === 'switch')
+    const restarts = allByClass(tree, 'dsh-mcp-icon-btn')
+    assert.equal(toggles.length, 2)
+    assert.equal(restarts.length, 2)
+    for (const node of [...toggles, ...restarts]) {
+      assert.equal(node.props.disabled, true)
+      assert.match(String(node.props.title), new RegExp(HAZARD_HINT))
+    }
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a closed transport is not a spawn hazard, so the row stays controllable', async () => {
+  const row = serverRow({ status: 'starting', toolCount: 0, live: { state: 'closed' } })
+  const { posts, fetch } = recordingFetch([row])
+  const mounted = mountPanel({ fetch })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const toggle = toggleButton(tree)
+    const restart = restartButton(tree)
+    assert.equal(toggle.props.disabled, false, 'a closed transport is settled: the escape hatch stays open')
+    assert.equal(restart.props.disabled, false)
+    assert.doesNotMatch(String(restart.props.title), /finish starting/)
+
+    await restart.props.onClick()
+    await flushMicrotasks()
+    assert.equal(posts.length, 1)
+    assert.equal(posts[0].url, RESTART_URL)
+    assert.deepEqual(posts[0].body, { entryId: 'include:rea' })
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a starting row without live data falls back to the hazard lock', async () => {
+  const row = serverRow({ status: 'starting' })
+  delete row.live
+  const mounted = mountPanel({ fetch: async () => response(stateBody([row])) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    assert.equal(toggleButton(tree).props.disabled, true)
+    assert.equal(restartButton(tree).props.disabled, true)
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('running, idle, error and stopped rows keep their controls enabled', async () => {
+  const rows = [
+    serverRow(),
+    serverRow({ entryId: 'include:idle', id: 'idle', serverName: 'idle', status: 'idle', live: { state: 'connected', toolCount: 0 } }),
+    serverRow({ entryId: 'include:bad', id: 'bad', serverName: 'bad', status: 'error', live: { state: 'failed', reason: 'gave-up' } }),
+    serverRow({ entryId: 'include:off', id: 'off', serverName: 'off', enabled: false, status: 'stopped' }),
+  ]
+  const mounted = mountPanel({ fetch: async () => response(stateBody(rows)) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const toggles = findAll(tree, (node) => node.props && node.props.role === 'switch')
+    const restarts = allByClass(tree, 'dsh-mcp-icon-btn')
+    assert.equal(toggles.length, 4)
+    assert.equal(restarts.length, 4)
+    for (const node of [...toggles, ...restarts]) {
+      assert.equal(node.props.disabled, false)
+      assert.doesNotMatch(String(node.props.title), /finish starting/)
+    }
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a stopped row is still startable', async () => {
+  const row = serverRow({ enabled: false, status: 'stopped' })
+  const { posts, fetch } = recordingFetch([row])
+  const mounted = mountPanel({ fetch })
+  try {
+    await flushMicrotasks()
+    const toggle = toggleButton(mounted.panel.render())
+    assert.equal(toggle.props.disabled, false)
+    assert.equal(toggle.props['aria-checked'], 'false')
+    await toggle.props.onClick()
+    await flushMicrotasks()
+    assert.equal(posts.length, 1)
+    assert.equal(posts[0].url, TOGGLE_URL)
+    assert.deepEqual(posts[0].body, { entryId: 'include:rea', enabled: true })
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a pending action still disables every control', async () => {
+  const row = serverRow()
+  const releases = []
+  const fetch = (url, init) => {
+    if (init !== undefined && init.method === 'POST') {
+      return new Promise((resolve) => {
+        releases.push(() => resolve(response(stateBody([row]))))
+      })
+    }
+    return Promise.resolve(response(stateBody([row])))
+  }
+  const mounted = mountPanel({ fetch })
+  try {
+    await flushMicrotasks()
+    toggleButton(mounted.panel.render()).props.onClick()
+    const tree = mounted.panel.render()
+    assert.equal(toggleButton(tree).props.disabled, true)
+    assert.equal(restartButton(tree).props.disabled, true)
+    assert.equal(textOf(byClass(tree, 'dsh-mcp-tag')), 'Stopping…')
+
+    for (const release of releases) release()
+    await flushMicrotasks()
+    assert.equal(toggleButton(mounted.panel.render()).props.disabled, false)
   } finally {
     mounted.panel.unmount()
   }
