@@ -25,12 +25,24 @@ Fixed:
   upstream then signals pid 0, i.e. the caller's whole process group
   (`@modelcontextprotocol/client` `StdioClientTransport._dispose()`). This is a
   UI-level mitigation for the user-driven case, not a platform fix.
-- The disabled controls carry a no-POST guard in their click handlers, so an
-  activation that still reaches one never writes to the routes.
-- A live `closed` cell is excluded because that transport has settled: the row
-  stays controllable (the escape hatch for a start that hangs). The guard never
-  disables the Start action of a `stopped` row and never changes a request body.
-- Tests (`test/client.test.mjs`, 8 new):
+- The **hazard-blocked** controls (not every disabled one) carry a no-POST guard
+  in their click handlers, so an activation that still reaches one never writes
+  to the routes; a `busy`-disabled control keeps the pre-1.4 behaviour (disabled
+  DOM plus its pending state).
+- A live `closed` cell is excluded because that state is published only at the
+  end of `dispose()` (`dsh-mcp-client` `connection.ts`), so such a row cannot
+  still be spawning. That exemption is **not** a way out of a start that hangs:
+  a hung start publishes `connecting`, never `closed`. The lock has no timer —
+  a row that stays `starting` keeps both controls disabled, indefinitely for
+  `waiting-credentials` (no retry is scheduled; `failOnStartupError` defaults to
+  false, so the fiber stays active) and for roughly two minutes in a
+  crash-restart back-off (10 attempts, 500 ms → 30 s by default, after which the
+  row settles as `error` and unlocks). The ways out are the ungated ones: the
+  `mcp_server` model tool (not UI-guarded), a profile-patch edit, or a Harness
+  restart. That UX cost is accepted as the price of never sending the hazard's
+  SIGTERM from a panel click. The guard never disables the Start action of a
+  `stopped` row and never changes a request body.
+- Tests (`test/client.test.mjs`, 9 new):
   `a starting row disables stop and restart and explains why`,
   `the starting hazard hint is localized`,
   `reconnecting and waiting-credentials starting rows are blocked too`,
@@ -38,15 +50,17 @@ Fixed:
   `a starting row without live data falls back to the hazard lock`,
   `running, idle, error and stopped rows keep their controls enabled`,
   `a stopped row is still startable`,
-  `a pending action still disables every control`.
+  `a pending action still disables every control`;
+  `a pending action wins over the hazard hint when the row turns starting`
+  (the audit-F4 follow-up pinning `busy` over the hazard hint).
 
 Changed:
 
 - Version 1.4.0. README (both halves), `docs/fix-map.md`, `docs/security.md`,
-  `docs/architecture.md` and `test/README.md` describe the guard and its escape
-  hatch, the remaining paths to the disposal, and the refreshed postures
-  (199 tests: 196 pass / 3 skip; 199/0 with the review catalog; 178 pass /
-  21 skip without the runtime).
+  `docs/architecture.md` and `test/README.md` describe the guard, its documented
+  lock-out window and the ungated ways out, the remaining paths to the disposal,
+  and the refreshed postures (200 tests: 197 pass / 3 skip; 200/0 with the review
+  catalog; 179 pass / 21 skip without the runtime).
 
 Known residual:
 

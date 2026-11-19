@@ -14,7 +14,7 @@ Five artefacts live here:
 
 ```sh
 npm install --no-audit --no-fund     # once; the only dependency is `yaml`
-npm test                             # the suite (199 tests; CI's gate)
+npm test                             # the suite (200 tests; CI's gate)
 
 node scripts/repro-review.mjs        # review-defect gate: exit 0 = no reviewed defect reproduces
 node scripts/repro-review.mjs --json # the same, machine readable
@@ -33,9 +33,9 @@ The three real-catalog schema cases are optional and private: point
 
 | Posture | `npm test` |
 | --- | --- |
-| unpacked runtime present, `MCP_REVIEW_CATALOG` unset (default local) | 199 tests, 196 pass / 3 skip / 0 fail |
-| unpacked runtime present, `MCP_REVIEW_CATALOG` set | 199 tests, 199 pass / 0 skip / 0 fail |
-| no runtime, no catalog (`DSH_RUNTIME=/nonexistent`, the CI posture) | 199 tests, 178 pass / 21 skip / 0 fail |
+| unpacked runtime present, `MCP_REVIEW_CATALOG` unset (default local) | 200 tests, 197 pass / 3 skip / 0 fail |
+| unpacked runtime present, `MCP_REVIEW_CATALOG` set | 200 tests, 200 pass / 0 skip / 0 fail |
+| no runtime, no catalog (`DSH_RUNTIME=/nonexistent`, the CI posture) | 200 tests, 179 pass / 21 skip / 0 fail |
 
 `npm test` is the gate CI runs. The three scripts are release gates run locally: `repro-review`
 needs the unpacked DSH runtime for its YAML family, `live-boot` boots a real server, and
@@ -214,10 +214,15 @@ skip is **not evidence**, and `--json` marks `skipped: true` / `authority: false
   `waiting-credentials`, or no live cell — anything but `closed`), the panel disables **Stop** and
   **Restart** and puts a localized reason in each control's `title`/`aria-label`
   (`hazard.starting`: `Wait for the server to finish starting before stopping or restarting it` /
-  `启动完成后再停止或重启`), and an activation that still reaches a disabled control performs no
-  POST. A live `closed` cell is the escape hatch and stays controllable; a `stopped` row's Start is
-  never disabled by the guard; a pending action still disables every control; a `starting` row
-  without live data falls back to the lock. Tests:
+  `启动完成后再停止或重启`), and a click that still reaches a *hazard-blocked* control performs no
+  POST (a `busy`-disabled control keeps the pre-1.4 behaviour). A live `closed` cell is not blocked
+  — `closed` is published only at the end of `dispose()`, so that row cannot still be spawning —
+  but it is **not** an escape from a hung start: a row stuck in `starting` keeps both controls
+  disabled (indefinitely for `waiting-credentials`, ~2 minutes for a crash-restart back-off), and
+  the ways out are the ungated `mcp_server` tool, a patch edit, or a Harness restart. The guard
+  also reads the last poll (`POLL_MS` 2.5 s), so it is a best-effort snapshot. A `stopped` row's
+  Start is never disabled by the guard; a pending action still disables every control; a
+  `starting` row without live data falls back to the lock. Tests:
   `a starting row disables stop and restart and explains why`;
   `the starting hazard hint is localized`;
   `reconnecting and waiting-credentials starting rows are blocked too`;
@@ -225,7 +230,8 @@ skip is **not evidence**, and `--json` marks `skipped: true` / `authority: false
   `a starting row without live data falls back to the hazard lock`;
   `running, idle, error and stopped rows keep their controls enabled`;
   `a stopped row is still startable`;
-  `a pending action still disables every control`.
+  `a pending action still disables every control`;
+  `a pending action wins over the hazard hint when the row turns starting`.
 
 ## The three worlds in `test/harness.mjs`
 
@@ -266,9 +272,9 @@ CI has no DSH runtime, so:
 
 * 18 runtime-dependent cases call `t.skip()` when `hasRuntime()` is false, and the 3
   real-catalog schema cases skip unless `MCP_REVIEW_CATALOG` names a local copy of the
-  private review catalog. Locally with the runtime present that is 196 pass / 3 skip
-  (199 pass / 0 skip with the variable set); without the runtime, which is the CI posture,
-  it is 178 pass / 21 skip. The live-status, audit-fix and 1.4.0 hazard cases are not skipped
+  private review catalog. Locally with the runtime present that is 197 pass / 3 skip
+  (200 pass / 0 skip with the variable set); without the runtime, which is the CI posture,
+  it is 179 pass / 21 skip. The live-status, audit-fix and 1.4.0 hazard cases are not skipped
   anywhere: their fixtures are pure JS.
 * `scripts/repro-review.mjs` is not part of `npm test`; its YAML family also skips when the
   DSH runtime is absent, and the script is a release gate, not a suite case.

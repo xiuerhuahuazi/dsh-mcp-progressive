@@ -291,10 +291,10 @@ degrading to the inference.
 
 The real-runtime smoke fixture that previously lacked a Host `connection` service is fixed in
 `02fe061`: `mountPlugin()` now provides it (and `mountPlugin({ connection: false })` models a
-host without it). With the runtime present `npm test` is 199 tests, 196 pass / 3 skip /
+host without it). With the runtime present `npm test` is 200 tests, 197 pass / 3 skip /
 0 fail (the three optional real-catalog cases skip unless `MCP_REVIEW_CATALOG` points at a
-local copy of the review catalog, which makes it 199 pass / 0 skip), and without the runtime
-(`DSH_RUNTIME=/nonexistent`, what CI has) it is 199 tests, 178 pass / 21 skip / 0 fail. The
+local copy of the review catalog, which makes it 200 pass / 0 skip), and without the runtime
+(`DSH_RUNTIME=/nonexistent`, what CI has) it is 200 tests, 179 pass / 21 skip / 0 fail. The
 1.3.0 live-status and 1.4.0 hazard cases run in every posture: their fixtures need no DSH
 runtime.
 
@@ -319,8 +319,8 @@ the final code:
   Agent/SystemPrompt seams are still stubbed) and F7 is recorded as the live-boot gate's
   coverage boundary in §7.1.
 
-Final postures on this tree: `npm test` 199 tests — 196 pass / 3 skip / 0 fail locally,
-199 pass / 0 skip with `MCP_REVIEW_CATALOG`, 178 pass / 21 skip / 0 fail under
+Final postures on this tree: `npm test` 200 tests — 197 pass / 3 skip / 0 fail locally,
+200 pass / 0 skip with `MCP_REVIEW_CATALOG`, 179 pass / 21 skip / 0 fail under
 `DSH_RUNTIME=/nonexistent` (the CI posture); `node scripts/repro-review.mjs` PASS — no
 reviewed defect reproduces (6/6 evaluated); `node scripts/live-boot.mjs` PASS `(11/11)` (real
 boot, including `state-live-broken` / `state-live-connected`, live rows settled in ≈70 ms);
@@ -349,9 +349,21 @@ boot, including `state-live-broken` / `state-live-connected`, live rows settled 
   signal). 1.4.0 adds a panel-side start-safety valve: while a row's Host status is `starting`
   and its live cell is not `closed` — i.e. `connecting`, `reconnecting`, `waiting-credentials`,
   or no live cell at all — the panel disables **Stop** and **Restart**, states the reason in
-  each control's `title` / `aria-label`, and the disabled control's handler does not POST. A
-  live `closed` cell is excluded because it proves the transport already settled (the escape
-  hatch), and the guard never disables the Start action of a `stopped` row. This mitigates the
+  each control's `title` / `aria-label`, and the **hazard-blocked** control's handler does not
+  POST (a `busy`-disabled control keeps the pre-1.4 behaviour). A live `closed` cell is excluded
+  because `closed` is published only at the end of `dispose()` (`dsh-mcp-client`
+  `connection.ts`), so that row cannot still be spawning; the exemption is **not** an escape
+  from a hung start, because a hung start publishes `connecting`, never `closed`. This
+  mitigation has a documented UX cost: the lock has **no timer**, so a row that stays
+  `starting` keeps both controls disabled — indefinitely for `waiting-credentials` (reachable
+  only with `expandTemplates` enabled; nothing schedules a retry, and `failOnStartupError`
+  defaults to false, so the fiber stays active) and for
+  roughly two minutes in a crash-restart back-off (10 attempts, 500 ms → 30 s by default, then
+  the row settles as `error` and unlocks). The only ways out are the **ungated** ones — the
+  `mcp_server` model tool (not UI-guarded), a profile-patch edit, or a Harness restart — which
+  reach the same disposal. The guard also decides from the last `/state` poll (`POLL_MS` is
+  2.5 s), so a row that enters the spawn window after the last render can still be clicked for
+  up to about one poll interval: a best-effort snapshot, not a lock. It mitigates the
   **user-driven** case only: the disposal path itself is unchanged and platform-owned, so a
   loader-driven reload/uninstall, a programmatic toggle (`mcp_server` is not guarded) or the
   Host's own disposal can still reach it. The signal delivery is observed through the gate's

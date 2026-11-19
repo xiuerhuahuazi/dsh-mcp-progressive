@@ -105,12 +105,21 @@ disconnected entirely (its child process exits) without unloading this plugin:
   `waiting-credentials` live states, or `starting` with no live cell at all — the panel disables
   its **Stop** and **Restart** controls and puts the reason in their `title` / `aria-label`
   (`Wait for the server to finish starting before stopping or restarting it`; Chinese
-  `启动完成后再停止或重启`): stopping or restarting a transport inside its version-negotiation
-  spawn window can dispose it mid-spawn and signal the Host's own process group (see
-  Limitations). A live `closed` cell proves the transport already settled, so that row stays
-  controllable — the escape hatch for a start that hangs. The guard only reads the Host status
-  and the live cell: it never disables the Start action of a `stopped` row, never changes a
-  request body, and a click that still reaches a blocked control does not POST. The list
+  `启动完成后再停止或重启`): stopping or restarting a transport that may still be inside its
+  version-negotiation spawn window can dispose it mid-spawn and signal the Host's own process
+  group (see Limitations). A live `closed` cell is not blocked, because `closed` is published
+  only at the end of `dispose()` — that row cannot still be spawning, so the exemption is not a
+  way out of a start that hangs. That lock has no timer: a row that stays `starting` keeps both
+  controls disabled — indefinitely for `waiting-credentials` (no retry is scheduled, and
+  `failOnStartupError` defaults to false, so the fiber stays active), and for roughly two
+  minutes in a crash-restart back-off (10 attempts, 500 ms → 30 s by default, after which the
+  row settles as `error` and unlocks). The documented ways out are the ungated ones: the
+  `mcp_server` model tool (not UI-guarded), editing the profile patch, or restarting the
+  Harness app. The safe behaviour carries that UX cost on purpose — a rare refused Stop is
+  cheaper than a SIGTERM to the caller's whole process group, and the disposal itself belongs
+  to the upstream SDK, not this plugin. The guard only reads the Host status and the live
+  cell: it never disables the Start action of a `stopped` row, never changes a request body,
+  and a click that still reaches a hazard-blocked control does not POST. The list
   reuses the built-in Plugins page card design (48px icon tile, 14px card title, 13px
   description, status tag, 36×20 switch) and DSH theme tokens only, so it matches the host in
   light and dark themes. It polls the same-origin routes; no client RPC surface is added.
@@ -322,14 +331,14 @@ What follows from the formula:
 
 Everything runs locally with no network and no access to `~/.dsh`:
 
-- `npm test` — the suite in `test/` (`node --test`), **199** tests. With the unpacked DSH
+- `npm test` — the suite in `test/` (`node --test`), **200** tests. With the unpacked DSH
   runtime present (`$DSH_RUNTIME`, default `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`) it
-  is 196 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
-  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 199 pass
+  is 197 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
+  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 200 pass
   / 0 skip; the catalog is private and not committed). Without the unpacked runtime
   (`DSH_RUNTIME=/nonexistent`, what CI has — `.github/workflows/test.yml`, Node 22 and 24,
   neither runtime nor catalog) the 18 runtime-dependent and the 3 real-catalog cases skip:
-  178 pass / 21 skip / 0 fail.
+  179 pass / 21 skip / 0 fail.
 - `node scripts/repro-review.mjs` — the review-defect **regression gate** (default
   `--expect fixed`). It replays the six defect families from the 2026-11-19 review and exits 0
   only when none of them reproduces; otherwise it prints `REGRESSION: <families>` and exits 1.
@@ -410,10 +419,16 @@ mapping is in [docs/fix-map.md](docs/fix-map.md).
   `StdioClientTransport._dispose()` may call `proc.kill("SIGTERM")` on a transport whose spawn has
   not completed, and a `ChildProcess` with no pid forwards that to pid 0. It is pre-existing
   (identical in 1.2.1) and not introduced by this plugin. 1.4.0's panel blocks the **user-driven**
-  Stop/Restart while a row is in that window (status `starting`, live cell not `closed`; the
-  disabled control never POSTs), but that is a UI mitigation only: the disposal itself is
+  Stop/Restart while a row is in that window (status `starting`, live cell not `closed`; a
+  hazard-blocked control never POSTs), but that is a UI mitigation only: the disposal itself is
   unchanged and platform-owned, so a loader-driven reload/uninstall, a programmatic toggle
-  (`mcp_server` is not guarded) or the Host's own disposal can still reach it. The signal was
+  (`mcp_server` is not guarded) or the Host's own disposal can still reach it. The guard also
+  decides from the last `/state` poll (`POLL_MS` is 2.5 s), so a row that enters the spawn
+  window after the last render can still be clicked for up to about one poll interval — it is a
+  best-effort snapshot, not a lock. And a row that never leaves `starting` keeps both controls
+  disabled with no in-panel way out (indefinitely for `waiting-credentials`, roughly two minutes
+  for a crash-restart back-off); the ways out are the same ungated ones: the `mcp_server` tool,
+  a profile-patch edit, or a Harness restart. The signal was
   observed through the capability gate's failure path (that gate now quiesces before disposing);
   the end-to-end DSH shutdown is **UNVERIFIED**. An upstream report is drafted in the 2026-11-19
   review workspace and is **not filed** — no URL and no fix are claimed. See
@@ -538,9 +553,16 @@ id 的 agent 不会共享同一份遮蔽。Harness 重启即重置。`eagerTools
   `title` / `aria-label`（`启动完成后再停止或重启`；英文
   `Wait for the server to finish starting before stopping or restarting it`）：在 spawn /
   版本协商窗口内停止或重启，可能在 transport 尚未 spawn 完成时把它 dispose 掉，进而把
-  SIGTERM 发给 Host 自己的进程组（见「限制」）。实时单元是 `closed` 的行说明 transport 已经
-  稳定，保持可操作——这是启动卡住时的逃生口。守卫只读 Host 状态与实时单元：它不会禁用
-  `stopped` 行的启动动作，不改变任何请求体，即使点击落到被禁用的控件上也不会发出 POST。
+  SIGTERM 发给 Host 自己的进程组（见「限制」）。实时单元是 `closed` 的行不会被禁用，因为
+  `closed` 只在 `dispose()` 末尾发布——这样的行不可能仍在 spawn，所以这条豁免**不是**启动
+  卡住时的出路。这个锁定没有计时器：一直停在 `starting` 的行会保持两个控件禁用——等待凭据
+  （`waiting-credentials`）时可以无限期（没有安排重试，`failOnStartupError` 默认 false，
+  fiber 保持活跃），崩溃重启退避时约两分钟（默认 10 次尝试、500 ms → 30 s，之后该行落到
+  `error` 并解锁）。有文档可查的出路都是那些没有加守卫的路径：模型工具 `mcp_server`
+  （**没有** UI 守卫）、编辑 profile 补丁，或重启 Harness 应用。这一 UX 代价是有意接受的
+  ——与其把 SIGTERM 发给调用方整个进程组，不如偶尔拒绝一次停止；而 disposal 本身属于上游
+  SDK，不属于本插件。守卫只读 Host 状态与实时单元：它不会禁用
+  `stopped` 行的启动动作，不改变任何请求体，即使点击落到被 hazard 拦住的控件上也不会发出 POST。
   卡片沿用插件页既有设计（48px 图标、14px 卡片标题、13px 描述、状态标签、
   36×20 开关）且只用 DSH 主题 token，明暗主题都与宿主一致；数据来自同源路由，不新增客户端 RPC。
 - **模型工具**：`mcp_servers` 列出所有已配置服务器及状态，并附同一行实时详情；
@@ -702,13 +724,13 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
 
 全部本地运行，不联网、不读写 `~/.dsh`：
 
-- `npm test`——`test/` 下的测试（`node --test`），共 **199** 个。在 `$DSH_RUNTIME`（默认
-  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 196 通过 / 3 跳过 /
+- `npm test`——`test/` 下的测试（`node --test`），共 **200** 个。在 `$DSH_RUNTIME`（默认
+  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 197 通过 / 3 跳过 /
   0 失败：三个「真实目录」schema 用例只有把 `MCP_REVIEW_CATALOG` 指向评审用 210 工具目录的
-  本地副本时才运行（此时 199 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。在没有解包运行时
+  本地副本时才运行（此时 200 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。在没有解包运行时
   的情况下（`DSH_RUNTIME=/nonexistent`，也就是 CI 的姿态——`.github/workflows/test.yml`，
   Node 22 与 24，既没有运行时也没有该目录），18 个依赖运行时的用例 + 3 个真实目录用例跳过：
-  178 通过 / 21 跳过 / 0 失败。
+  179 通过 / 21 跳过 / 0 失败。
 - `node scripts/repro-review.mjs`——评审缺陷**回归门**（默认 `--expect fixed`）。它把
   2026-11-19 评审的六组缺陷在当前代码上重放，只有一组都不复现时才 exit 0；否则打印
   `REGRESSION: <families>` 并 exit 1。凡是能观察到「修好后的结果」的组（准入、控制队列、
@@ -776,9 +798,13 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
   `StdioClientTransport._dispose()` 可能在 transport 的 spawn 尚未完成时调用
   `proc.kill("SIGTERM")`，而没有 pid 的 `ChildProcess` 会把它转发给 pid 0。它是既有问题
   （1.2.1 同样存在），不是本插件引入的。1.4.0 的面板现在拦住了**用户点按钮**触发的停止/重启
-  （行状态为 `starting` 且实时单元不是 `closed`；被禁用的控件不会发出 POST），但这只是 UI 层
-  的缓解：disposal 本身没有改变、仍由平台拥有，所以 Loader 驱动的重载/卸载、程序化开关
-  （`mcp_server` 未加守卫）或 Host 自己的 disposal 仍可能走到那条路径。该信号在能力门的失败
+  （行状态为 `starting` 且实时单元不是 `closed`；被 hazard 拦住的控件不会发出 POST），但这只是
+  UI 层的缓解：disposal 本身没有改变、仍由平台拥有，所以 Loader 驱动的重载/卸载、程序化开关
+  （`mcp_server` 未加守卫）或 Host 自己的 disposal 仍可能走到那条路径。守卫还依据上一次
+  `/state` 轮询的结果判断（`POLL_MS` 为 2.5 s），所以在上次渲染之后才进入 spawn 窗口的行，仍可能
+  在约一个轮询间隔内被点击——它是尽力而为的快照，不是锁。而一直停在 `starting` 的行会让两个控件
+  保持禁用、面板内没有出路（`waiting-credentials` 可无限期，崩溃重启退避约两分钟）；出路仍是那些
+  没有加守卫的路径：`mcp_server` 工具、改 profile 补丁，或重启 Harness。该信号在能力门的失败
   路径上被观察到（能力门现在会先 quiesce 再 dispose）；端到端是否会关掉整个 DSH **未验证**。
   上游报告已在 2026-11-19 评审工作区起草，**尚未提交**——不声称有 URL，也不声称已修复。见
   [docs/security.md](docs/security.md) → 残余风险（audit R1）。

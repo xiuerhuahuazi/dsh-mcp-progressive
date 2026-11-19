@@ -80,9 +80,15 @@ status / rollback).
 
 1.4.0 adds no server-side seam: the panel's start-safety valve (`client.js` · `spawnHazard`) only
 disables **Stop/Restart** while a row's status is `starting` and its live cell is not `closed`
-(audit R1). It is a **UI mitigation only** — the disposal that can signal the caller's process
-group belongs to `@deepseek-ai/dsh-mcp-client` / `@modelcontextprotocol/client`, so the routes,
-the `mcp_server` tool and a loader-driven reload/uninstall are unchanged and can still reach it.
+(audit R1). The `closed` exemption is not a way out of a hung start — `closed` is published only
+at the end of `dispose()`, while a hung start stays `connecting` — so a row that never leaves
+`starting` keeps both controls disabled (indefinitely for `waiting-credentials`, roughly two
+minutes for a crash-restart back-off); the ungated `mcp_server` tool, a patch edit and a Harness
+restart are the ways out, and the decision comes from the last `/state` poll (`POLL_MS` 2.5 s),
+so the guard is a best-effort snapshot. It is a **UI mitigation only** — the disposal that can
+signal the caller's process group belongs to `@deepseek-ai/dsh-mcp-client` /
+`@modelcontextprotocol/client`, so the routes, the `mcp_server` tool and a loader-driven
+reload/uninstall are unchanged and can still reach it.
 
 ## 5. mcp-manager migration verdict
 

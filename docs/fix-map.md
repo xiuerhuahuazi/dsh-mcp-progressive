@@ -129,13 +129,21 @@ The 1.4.0 change is a **UI mitigation** for the upstream mid-spawn SIGTERM hazar
 `client.js` disables the panel's Stop/Restart while a row's Host status is `starting` and its
 live cell does not prove the transport settled, so a user click cannot dispose a
 `StdioClientTransport` inside the version-negotiation spawn window. It changes no route, no
-request body, no server half, and it does not fix the upstream disposal.
+request body, no server half, and it does not fix the upstream disposal. Two costs are
+documented rather than hidden: the lock has **no timer** (a row that stays `starting` keeps
+both controls disabled — indefinitely for `waiting-credentials`, roughly two minutes for a
+crash-restart back-off — and the `closed` exemption is safe, but a hung start never reaches
+it, since `closed` is published only at the end of `dispose()`), and the decision comes from
+the last `/state` poll (`POLL_MS` 2.5 s), so a just-started row can briefly show its controls
+enabled. The ways out of a stuck row are the ungated `mcp_server` tool, a patch edit, or a
+Harness restart; the UX cost is accepted because a panel click must never send the hazard's
+SIGTERM.
 
 | Item | Status | What changed (file · function) | Regression evidence (test file › test name) |
 |---|---|---|---|
-| H1 — panel Stop/Restart can dispose a transport mid-spawn | Mitigated (UI only; upstream not fixed) | `client.js` · `spawnHazard(server)` returns true only when `status === 'starting'` and the `live` cell is absent or its `state` is not `closed`; `card` computes `hazard = spawnHazard(server) && !busy`, sets `disabled` on both the switch and the restart button when `busy` or `hazard`, and adds the reason to each control's `title` / `aria-label` via the new dict key `hazard.starting` (EN/ZH) | `test/client.test.mjs` › `a starting row disables stop and restart and explains why`; `the starting hazard hint is localized`; `reconnecting and waiting-credentials starting rows are blocked too`; `a closed transport is not a spawn hazard, so the row stays controllable`; `a starting row without live data falls back to the hazard lock`; `running, idle, error and stopped rows keep their controls enabled`; `a stopped row is still startable`; `a pending action still disables every control` |
-| H2 — an activation that reaches a blocked control must not hit the wire | Fixed | `client.js` · the restart button and the switch both return before `act(...)` while `hazard` is set (no-POST guard) | `test/client.test.mjs` › `a starting row disables stop and restart and explains why` (invokes both handlers and asserts zero POSTs); `a closed transport is not a spawn hazard, so the row stays controllable` (the escape hatch still POSTs `{ entryId }` to `RESTART_URL`) |
-| H3 — escape hatch and the Start path must keep working | Verified | `client.js` · `spawnHazard` is false for a live `closed` cell and for every non-`starting` status; `busy` still wins, so a pending action disables the row as before | `test/client.test.mjs` › `a closed transport is not a spawn hazard, so the row stays controllable`; `a stopped row is still startable`; `a pending action still disables every control`; `running, idle, error and stopped rows keep their controls enabled` |
+| H1 — panel Stop/Restart can dispose a transport mid-spawn | Mitigated (UI only; upstream not fixed) | `client.js` · `spawnHazard(server)` returns true only when `status === 'starting'` and the `live` cell is absent or its `state` is not `closed`; `card` computes `hazard = spawnHazard(server) && !busy`, sets `disabled` on both the switch and the restart button when `busy` or `hazard`, and adds the reason to each control's `title` / `aria-label` via the new dict key `hazard.starting` (EN/ZH) | `test/client.test.mjs` › `a starting row disables stop and restart and explains why`; `the starting hazard hint is localized`; `reconnecting and waiting-credentials starting rows are blocked too`; `a closed transport is not a spawn hazard, so the row stays controllable`; `a starting row without live data falls back to the hazard lock`; `running, idle, error and stopped rows keep their controls enabled`; `a stopped row is still startable`; `a pending action still disables every control`; `a pending action wins over the hazard hint when the row turns starting` |
+| H2 — an activation that reaches a blocked control must not hit the wire | Fixed | `client.js` · the restart button and the switch both return before `act(...)` while `hazard` is set (no-POST guard); a `busy`-disabled control keeps the pre-1.4 behaviour | `test/client.test.mjs` › `a starting row disables stop and restart and explains why` (invokes both handlers and asserts zero POSTs); `a closed transport is not a spawn hazard, so the row stays controllable` (a non-hazard click still POSTs `{ entryId }` to `RESTART_URL`) |
+| H3 — the `closed` exemption, `busy` precedence and the Start path must keep working | Verified | `client.js` · `spawnHazard` is false for a live `closed` cell and for every non-`starting` status; `busy` still wins, so a pending action disables the row as before (its pending label wins over the hazard hint) | `test/client.test.mjs` › `a closed transport is not a spawn hazard, so the row stays controllable`; `a stopped row is still startable`; `a pending action still disables every control`; `a pending action wins over the hazard hint when the row turns starting`; `running, idle, error and stopped rows keep their controls enabled` |
 
 Known residual (recorded, **not fixed** in 1.4.0): **R1** remains a platform/upstream issue.
 The panel guard covers only the user-driven case; a loader-driven reload/uninstall, a
@@ -154,20 +162,20 @@ Environment: this worktree (1.4.0), Node v25.8.0, macOS, unpacked runtime presen
 
 ```
 $ npm test                      # unpacked runtime present, MCP_REVIEW_CATALOG unset
-ℹ tests 199
-ℹ pass 196
+ℹ tests 200
+ℹ pass 197
 ℹ fail 0
 ℹ skipped 3
 
 $ MCP_REVIEW_CATALOG=<review catalog> npm test
-ℹ tests 199
-ℹ pass 199
+ℹ tests 200
+ℹ pass 200
 ℹ fail 0
 ℹ skipped 0
 
 $ DSH_RUNTIME=/nonexistent npm test      # what CI runs (no runtime, no catalog)
-ℹ tests 199
-ℹ pass 178
+ℹ tests 200
+ℹ pass 179
 ℹ fail 0
 ℹ skipped 21
 ```
@@ -216,7 +224,7 @@ $ node scripts/live-boot.mjs        # default --expect fixed, real boot
 
   live rows settled: yes (waited 74 ms)
 
-  PASS  (11/11)  (2024 ms)
+  PASS  (11/11)  (2027 ms)
 ```
 
 `live-boot` also snapshots both patch layers before and after the probes and fails unless
@@ -243,7 +251,7 @@ $ node scripts/probe-live-status.mjs
   PASS  C. real row: status running with toolCount 2 and no detail
 
   cleanup: quiesced yes (0 ms, states failed/connected); disposed 2; skipped 0;
-  servers 29795:process already gone, 29797:process already gone; spawned reaped 0;
+  servers 43414:process already gone, 43416:process already gone; spawned reaped 0;
   temp removed yes
 
   PASS  (8/8 assertions)
