@@ -1,5 +1,7 @@
 # Fix map — 1.2.0 review → 1.2.1, 1.3.0 live status, 1.4.0 start-safety valve
 
+> Historical v1.4.0 verification. See the [changelog](../CHANGELOG.md) for subsequent releases.
+
 Audit trail for the 2026-11-19 review (`SYNTHESIS.md` §3/§4/§5) and for the 1.3.0
 live-status and 1.4.0 start-safety-valve changes. Every row names the code that changed and
 the regression that locks it. Test names are verbatim from the files; a test may cover
@@ -51,7 +53,7 @@ several rows.
 
 | Item | Status | What changed (file · function) | Regression evidence |
 |---|---|---|---|
-| P1-1 — cost model as a constant; strategy by money | Fixed | `README.md` · “Cost: what a load actually costs”: `cost ≈ prompt length × (P_miss − P_hit)`, measured endpoints with their caveats, one measured load example, monotonic/batch/`mcp_call` guidance | Documentation: `README.md` (English and Chinese halves). No test. |
+| P1-1 — cost guidance | Superseded | The v1.6.0 README compares observed request usage instead of predicting a charge from prompt length. | [Measurement](../README.md#measured-usage-direct-call-load-and-keep-or-toggle) |
 | P1-2 — status only from `enabled`/`fiberPhase`/`toolCount` | Fixed | `lib/management.js` · `collectServerRows` reads `row.diagnostic`; `serverStatus` reports `error` on a diagnostic and `stopping`; `presentServer` / `renderServerList` expose it; `client.js` renders the diagnostic on the card | `test/management.test.mjs` › `the state route reports diagnostic, stopping and the full row contract`; `serverStatus keeps the documented vocabulary, including stopping`; `test/client.test.mjs` › `a server diagnostic is rendered on the card` |
 | P1-3 — same-batch load + call yields a bare unknown tool | Fixed | `index.js` · corrective `tools/pre-execute` branch: catalog name + globally visible + not in this step's `toolSet` → deny with next-step guidance | `test/core.test.mjs` › `P1-3: a tool loaded in this step is refused with next-step guidance` |
 | P1-4 — `eagerTools` applies to subagents | Fixed | `index.js` · `isSubagent` (`header.origin === 'subagent'` or `delegationDepth > 0`), `loadedSet` seeds `eagerTools` for roots only; missing metadata → root | `test/core.test.mjs` › `P1-4: eagerTools applies to root agents only` |
@@ -102,7 +104,7 @@ The 1.3.0 change is a read, not a rewrite: each server row now prefers the runni
 own status cell, with the 1.2.1 inference as the fallback. The public status vocabulary is
 unchanged; the explanation travels as `statusDetail` text. The memo behind the design (source,
 probes, migration verdict) is
-`dsh-mcp-progressive-review/2026-11-19/arch-1.3-investigation.md`; the resulting design is in
+the historical review; the resulting design is in
 [docs/architecture.md](architecture.md).
 
 | Item | Status | What changed (file · function) | Regression evidence (test file › test name) |
@@ -149,16 +151,12 @@ Known residual (recorded, **not fixed** in 1.4.0): **R1** remains a platform/ups
 The panel guard covers only the user-driven case; a loader-driven reload/uninstall, a
 programmatic toggle (`mcp_server` is not guarded) and the Host's own disposal still reach
 `@modelcontextprotocol/client`'s `_dispose()` mid-spawn and can signal the caller's process
-group. End-to-end DSH shutdown through that path is **UNVERIFIED**. An upstream report is
-drafted at `dsh-mcp-progressive-review/2026-11-19/upstream-issue-mcp-sdk-sigterm.md` (outside
-this repo) and is **not filed**; no URL and no fix are claimed. See
+group. End-to-end DSH shutdown through that path is **UNVERIFIED**. No upstream fix was verified. See
 [security.md §8](security.md#8-residual-risks--deferred).
 
 ## Evidence run
 
-Environment: this worktree (1.4.0), Node v25.8.0, macOS, unpacked runtime present at
-`/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`, review catalog at
-`dsh-mcp-progressive-review/2026-11-19/probe/deepseek/catalog.json`.
+Environment: v1.4.0, Node v25.8.0, macOS, unpacked runtime.
 
 ```
 $ npm test                      # unpacked runtime present, MCP_REVIEW_CATALOG unset
@@ -328,7 +326,7 @@ file. Statuses are for this tree.
 ### 1.3 review — verdict: **ship-with-notes** (commit audited `f523da1`)
 
 Independent adversarial pass over the merged 1.3.0 live-status change
-(`dsh-mcp-progressive-review/2026-11-19/audit-1.3-live-status.md`): final code and vendored
+(the historical review): final code and vendored
 runtime read, every gate run, throwaway probes for the seam/fallback/client/install. Reviewer's
 gate numbers at `f523da1`: 187 tests (184 pass / 3 skip), 187/0 with the catalog, 166/21 CI;
 `repro-review` `0/6` PASS; `live-boot` `PASS (11/11)`, live rows settled in 66 ms;

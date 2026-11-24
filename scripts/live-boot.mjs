@@ -40,19 +40,23 @@
  *      inference alone would have said `idle`;
  *   4. `state-live-connected` requires `status: "running"`,
  *      `live.state: "connected"`, `live.toolCount >= 2` and no
- *      `statusDetail`.
+ *      `statusDetail`;
+ *   5. `state-disclosure` (v1.5) requires the read-only hidden-footprint
+ *      snapshot (`disclosure.hiddenTools >= 2`, positive token estimate) and
+ *      the same counters on the connected row.
  *
  * `--expect baseline` documents the 1.2.0 behaviour and ONLY matches a v1.2.0
  * checkout: there the routes had no admission, accepted any media type and
  * coerced an invalid `enabled` to "stop". It exits 1 on this checkout, by
- * design; that is not a regression. The two `state-live-*` probes are reported
- * as `skip` there: rows carry no `live` field and 1.3's loader-row additions
- * cannot exist in 1.2.0, so asserting them would be dishonest rather than
- * informative. They are skipped in fallback mode too (no real Loader rows).
+ * design; that is not a regression. The four live/disclosure/lazy probes are
+ * reported as `skip` there: rows carry no `live` field, 1.3's loader-row
+ * additions cannot exist in 1.2.0, and the footprint is a v1.5 addition, so
+ * asserting them would be dishonest rather than informative. They are skipped
+ * in fallback mode too (no real Loader rows).
  * A skipped probe is printed and counted separately, and a run that skips any
  * probe still exits 0 when its remaining assertions hold (CI and fallback rely
  * on that) but its verdict is not the platform gate: the summary line counts it
- * (`PASS (9/11, 2 skipped — fallback/no runtime: skips are not evidence)`) and
+ * (`PASS (9/13, 4 skipped — fallback/no runtime: skips are not evidence)`) and
  * `--json` carries `skipsNotEvidence: true` / `authority: false`.
  *
  * Usage: node scripts/live-boot.mjs [--expect fixed|baseline] [--port N] [--json] [--keep]
@@ -96,8 +100,10 @@ if (expectation !== 'baseline' && expectation !== 'fixed') {
  */
 const MCP_ROW_BROKEN = 'mcp-probe-broken'
 const MCP_ROW_OK = 'mcp-probe-ok'
+const MCP_ROW_LAZY = 'mcp-probe-lazy'
 const MCP_SERVER_BROKEN = 'probe-broken'
 const MCP_SERVER_OK = 'probe-ok'
+const MCP_SERVER_LAZY = 'probe-lazy'
 /** A command that cannot exist, so the client's spawn fails with ENOENT. */
 const BROKEN_COMMAND = '/nonexistent/definitely-not-a-command'
 /** The route both the gate and the live-settle wait read. */
@@ -133,6 +139,8 @@ const EXPECTATIONS = {
     // assert, so the historical mode reports them honestly as skips.
     'state-live-broken': { skip: 'a 1.2.0 row carries no live status; the row contract is a 1.3 addition' },
     'state-live-connected': { skip: 'a 1.2.0 row carries no live status; the row contract is a 1.3 addition' },
+    'state-disclosure': { skip: 'the hidden-footprint fields are a v1.5 addition' },
+    'state-lazy-row': { skip: 'the lazy-connect fields are a v1.6 addition' },
   },
   fixed: {
     'state-unauthenticated': { status: 403, accept: [401, 403], jsonError: true },
@@ -161,6 +169,28 @@ const EXPECTATIONS = {
         liveState: 'connected',
         toolCountAtLeast: 2,
         detailNull: true,
+      },
+    },
+    // The v1.5 read-only footprint: the connected probe server contributes two
+    // hidden catalog tools, and the panel payload carries the same numbers.
+    'state-disclosure': {
+      status: 200,
+      disclosure: {
+        hiddenToolsAtLeast: 2,
+        serverName: MCP_SERVER_OK,
+        serverHiddenToolsAtLeast: 2,
+      },
+    },
+    'state-lazy-row': {
+      status: 200,
+      row: {
+        serverName: MCP_SERVER_LAZY,
+        status: 'stopped',
+        enabled: false,
+        lazy: true,
+        hiddenToolsAtLeast: 1,
+        hiddenTokensPositive: true,
+        toolCountEquals: 0,
       },
     },
   },
@@ -338,6 +368,29 @@ async function prepareProfile(home) {
   // throw-away home, speaks stdio only, and dies when the app closes its pipe.
   const fakeServer = path.join(home, 'fake-mcp-server.mjs')
   await fsp.writeFile(fakeServer, MINI_MCP_SERVER_SOURCE, 'utf8')
+  // Pre-seed the lazy tool cache so `state-lazy-row` proves the cache read, not
+  // just the config flag. The plugin's cachePath below points here.
+  const cacheDir = path.join(home, 'mcp-progressive')
+  await fsp.mkdir(cacheDir, { recursive: true })
+  await fsp.writeFile(
+    path.join(cacheDir, 'tool-cache.json'),
+    JSON.stringify({
+      version: 1,
+      servers: {
+        [MCP_SERVER_LAZY]: {
+          updatedAt: Date.now(),
+          tools: [
+            {
+              name: `mcp__${MCP_SERVER_LAZY}__cached_ping`,
+              description: 'A cached lazy tool used by the live-boot probe.',
+              parameters: { type: 'object', properties: { text: { type: 'string' } }, required: [] },
+            },
+          ],
+        },
+      },
+    }),
+    'utf8',
+  )
   // The profile's own user layer: the row the plugin's bundle patch inserts,
   // then the two real `dsh-mcp-client` rows the live-status probes need. The
   // client resolves its bare module name against the installed runtime, so the
@@ -345,7 +398,10 @@ async function prepareProfile(home) {
   const patchRows = [
     '# profile user patch layer',
     '- id: mcp-progressive',
-    '  config: {}',
+    '  config:',
+    `    lazyConnect: [${MCP_SERVER_LAZY}]`,
+    `    cachePath: ${yamlString(path.join(home, 'mcp-progressive', 'tool-cache.json'))}`,
+    '    warmIdleMs: 0',
     // A new row is an `insert` patch entry, exactly like a user's home patch
     // declaring an MCP server; the bare module name resolves against the
     // installed runtime's package scope.
@@ -369,6 +425,17 @@ async function prepareProfile(home) {
     '        args:',
     `          - ${yamlString(fakeServer)}`,
     '        reconnect: { enabled: true, initialDelayMs: 25, maxDelayMs: 50, maxAttempts: 2 }',
+    '        startupTimeoutMs: 10000',
+    '- insert:',
+    `    - id: ${MCP_ROW_LAZY}`,
+    "      name: '@deepseek-ai/dsh-mcp-client'",
+    '      disabled: true',
+    '      config:',
+    `        serverName: ${MCP_SERVER_LAZY}`,
+    '        transport: stdio',
+    `        command: ${yamlString(process.execPath)}`,
+    '        args:',
+    `          - ${yamlString(fakeServer)}`,
     '        startupTimeoutMs: 10000',
     '',
   ]
@@ -542,6 +609,7 @@ function allowTokens(headers) {
 /** Compare one probe with its expectation; returns `{ ok, reasons }`. */
 function evaluate(entry, spec) {
   const reasons = []
+  const servers = Array.isArray(entry.body?.servers) ? entry.body.servers : []
   const accepted = spec.accept ?? [spec.status]
   if (!accepted.includes(entry.status)) {
     reasons.push(`status ${entry.status} not in ${accepted.join('/')}`)
@@ -557,8 +625,37 @@ function evaluate(entry, spec) {
       reasons.push('body is not the JSON {ok:false,error} refusal')
     }
   }
+  if (spec.disclosure !== undefined) {
+    const want = spec.disclosure
+    const snapshot = entry.body?.disclosure
+    if (snapshot === null || typeof snapshot !== 'object') {
+      reasons.push('body.disclosure is missing (the v1.5 footprint was not computed)')
+    } else {
+      if (!(typeof snapshot.hiddenTools === 'number' && snapshot.hiddenTools >= want.hiddenToolsAtLeast)) {
+        reasons.push(
+          `disclosure.hiddenTools ${JSON.stringify(snapshot.hiddenTools ?? null)} < ${want.hiddenToolsAtLeast}`,
+        )
+      }
+      if (!(typeof snapshot.hiddenTokens === 'number' && snapshot.hiddenTokens > 0)) {
+        reasons.push(`disclosure.hiddenTokens ${JSON.stringify(snapshot.hiddenTokens ?? null)} is not positive`)
+      }
+    }
+    const row = servers.find((candidate) => candidate?.serverName === want.serverName)
+    if (row === undefined) {
+      const observed = servers.map((candidate) => candidate?.serverName ?? '?').join(', ')
+      reasons.push(
+        `no /state row for server ${JSON.stringify(want.serverName)} (rows: ${observed === '' ? '<none>' : observed})`,
+      )
+    } else {
+      if (!(typeof row.hiddenTools === 'number' && row.hiddenTools >= want.serverHiddenToolsAtLeast)) {
+        reasons.push(`row hiddenTools ${JSON.stringify(row.hiddenTools ?? null)} < ${want.serverHiddenToolsAtLeast}`)
+      }
+      if (!(typeof row.hiddenTokens === 'number' && row.hiddenTokens > 0)) {
+        reasons.push(`row hiddenTokens ${JSON.stringify(row.hiddenTokens ?? null)} is not positive`)
+      }
+    }
+  }
   if (spec.row !== undefined) {
-    const servers = Array.isArray(entry.body?.servers) ? entry.body.servers : []
     const want = spec.row
     const row = servers.find((candidate) => candidate?.serverName === want.serverName)
     if (row === undefined) {
@@ -587,6 +684,24 @@ function evaluate(entry, spec) {
           reasons.push(`row live.toolCount ${JSON.stringify(count ?? null)} < ${want.toolCountAtLeast}`)
         }
       }
+      if (want.enabled !== undefined && row.enabled !== want.enabled) {
+        reasons.push(`row enabled ${JSON.stringify(row.enabled ?? null)} != ${JSON.stringify(want.enabled)}`)
+      }
+      if (want.lazy !== undefined && row.lazy !== want.lazy) {
+        reasons.push(`row lazy ${JSON.stringify(row.lazy ?? null)} != ${JSON.stringify(want.lazy)}`)
+      }
+      if (want.hiddenToolsAtLeast !== undefined) {
+        const hidden = row.hiddenTools
+        if (!(typeof hidden === 'number' && hidden >= want.hiddenToolsAtLeast)) {
+          reasons.push(`row hiddenTools ${JSON.stringify(hidden ?? null)} < ${want.hiddenToolsAtLeast}`)
+        }
+      }
+      if (want.hiddenTokensPositive === true && !(typeof row.hiddenTokens === 'number' && row.hiddenTokens > 0)) {
+        reasons.push(`row hiddenTokens ${JSON.stringify(row.hiddenTokens ?? null)} is not positive`)
+      }
+      if (want.toolCountEquals !== undefined && row.toolCount !== want.toolCountEquals) {
+        reasons.push(`row toolCount ${JSON.stringify(row.toolCount ?? null)} != ${want.toolCountEquals}`)
+      }
     }
   }
   return { ok: reasons.length === 0, reasons }
@@ -607,8 +722,11 @@ function observedRow(entry, serverName) {
     status: row.status,
     fiberPhase: row.fiberPhase ?? null,
     enabled: row.enabled ?? null,
+    lazy: row.lazy ?? null,
     live: row.live ?? null,
     toolCount: row.toolCount ?? null,
+    hiddenTools: row.hiddenTools ?? null,
+    hiddenTokens: row.hiddenTokens ?? null,
     statusDetail: row.statusDetail ?? null,
     diagnostic: row.diagnostic ?? null,
   }
@@ -721,6 +839,8 @@ async function main() {
       ])
       answers.push(await httpProbe('state-live-broken', origin, state, { cookie }))
       answers.push(await httpProbe('state-live-connected', origin, state, { cookie }))
+      answers.push(await httpProbe('state-disclosure', origin, state, { cookie }))
+      answers.push(await httpProbe('state-lazy-row', origin, state, { cookie }))
     }
     const after = snapshotPatches(patchPaths)
 
@@ -813,7 +933,7 @@ async function main() {
       )
       if (entry.row !== undefined && entry.row !== null) {
         console.log(
-          `        row: status=${entry.row.status} fiberPhase=${entry.row.fiberPhase ?? '-'} live=${JSON.stringify(entry.row.live)} toolCount=${entry.row.toolCount ?? '-'} statusDetail=${JSON.stringify(entry.row.statusDetail)}`,
+          `        row: status=${entry.row.status} fiberPhase=${entry.row.fiberPhase ?? '-'} enabled=${entry.row.enabled ?? '-'} lazy=${entry.row.lazy ?? '-'} hiddenTools=${entry.row.hiddenTools ?? '-'} hiddenTokens=${entry.row.hiddenTokens ?? '-'} live=${JSON.stringify(entry.row.live)} toolCount=${entry.row.toolCount ?? '-'} statusDetail=${JSON.stringify(entry.row.statusDetail)}`,
         )
       }
       if (entry.row === null) console.log(`        row: <absent from /state>`)

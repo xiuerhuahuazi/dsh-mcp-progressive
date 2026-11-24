@@ -1,6 +1,6 @@
 {
   "name": "dsh-mcp-progressive",
-  "version": "1.4.0",
+  "version": "1.6.0",
   "description": "MCP progressive disclosure plus MCP server control: tool schemas stay out of the model context until needed, and a Plugins-page tab starts, stops or restarts MCP servers.",
   "author": "xiuerhuahuazi",
   "license": "MIT",

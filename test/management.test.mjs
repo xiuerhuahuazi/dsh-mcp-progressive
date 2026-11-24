@@ -10,12 +10,23 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
+import fsp from 'node:fs/promises'
 import nodePath from 'node:path'
 import test from 'node:test'
 
 import { parse } from 'yaml'
 
-import { MANAGEMENT_ROUTES, createManagementEnv, request, withVirtualClock } from './harness.mjs'
+import {
+  MANAGEMENT_ROUTES,
+  createFakeContext,
+  createFakeToolsService,
+  createManagementEnv,
+  createManagementEnvWithOptions,
+  flushMicrotasks,
+  makeTempDir,
+  request,
+  withVirtualClock,
+} from './harness.mjs'
 import {
   MANAGER_CALL_MS,
   MCP_CLIENT_MODULE,
@@ -24,12 +35,14 @@ import {
   SERVER_WAIT_MS,
   awaitBounded,
   boundedDeadline,
+  collectServerRows,
   createControlQueue,
   isMcpClientModule,
   liveStatusOf,
   liveStatusView,
   presentServer,
   readJsonBody,
+  registerServerManagement,
   renderServerList,
   resolveServerTarget,
   sanitizeLiveStatus,
@@ -1566,4 +1579,793 @@ test('F5: a hand-built non-string lastError cannot make the detail throw', () =>
     view({ state: 'reconnecting', attempt: 1, maxAttempts: 2, lastError: { code: 'X' } }).detail,
     'reconnecting (attempt 1/2)',
   )
+})
+
+// ---------------------------------------------------------------------------
+// v1.5 hidden footprint / loaded view (management side).
+//
+// The Host lane owns the two callbacks; these tests drive the management half
+// with hand-built snapshots so the merge, the render text and every failure
+// mode are pinned independently of the Host wiring.
+// ---------------------------------------------------------------------------
+
+/** One footprint snapshot shaped exactly like the Host seam. */
+function footprintSnapshot() {
+  return {
+    total: {
+      tools: 5,
+      hiddenTools: 2,
+      hiddenTokens: 1500,
+      hiddenChars: 4836,
+      loadedTools: 1,
+      notAdopted: [{ name: 'mcp__demo__alpha', reason: 'always visible (config)' }],
+    },
+    byServer: {
+      demo: { tools: 3, hiddenTools: 2, hiddenTokens: 1500, hiddenChars: 4836, loadedTools: 1 },
+    },
+  }
+}
+
+test('the state route reports the footprint snapshot and the loaded view', async (t) => {
+  const agentsSeen = []
+  const env = await createManagementEnvWithOptions({
+    footprint(agent) {
+      agentsSeen.push(agent)
+      return footprintSnapshot()
+    },
+    loadedView() {
+      return { agents: [{ id: 'agent-1', title: null, delegationDepth: 0, loaded: ['mcp__demo__alpha'] }] }
+    },
+  })
+  t.after(() => env.dispose())
+
+  const response = await request(env, STATE)
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.body.disclosure, footprintSnapshot().total)
+  assert.deepEqual(response.body.loaded, {
+    agents: [{ id: 'agent-1', title: null, delegationDepth: 0, loaded: ['mcp__demo__alpha'] }],
+  })
+  assert.equal(agentsSeen.length, 1, 'the snapshot is computed once per request')
+  assert.equal(agentsSeen[0], undefined, 'the panel request carries no live agent')
+
+  const server = response.body.servers[0]
+  assert.equal(server.serverName, 'demo')
+  assert.equal(server.hiddenTools, 2)
+  assert.equal(server.hiddenTokens, 1500)
+  assert.equal(server.hiddenChars, 4836)
+  assert.equal(server.loadedTools, 1)
+})
+
+test('collectServerRows merges finite per-server counters only', async (t) => {
+  const env = await createManagementEnv({
+    rows: [row({ entryId: 'include:demo', patchId: 'demo' }), row({ entryId: 'include:other', patchId: 'other' })],
+    entries: [
+      { id: 'include:demo', options: { config: { serverName: 'demo', command: 'node' } } },
+      { id: 'include:other', options: { config: { serverName: 'other', command: 'node' } } },
+    ],
+  })
+  t.after(() => env.dispose())
+
+  const servers = await collectServerRows(env.ctx, {
+    footprint: {
+      byServer: {
+        demo: {
+          tools: 99,
+          hiddenTools: 2,
+          hiddenTokens: 1500.9,
+          hiddenChars: '4800',
+          loadedTools: 0,
+        },
+        other: {
+          hiddenTools: -1,
+          hiddenTokens: Number.NaN,
+          hiddenChars: Number.POSITIVE_INFINITY,
+          loadedTools: 1.8,
+        },
+      },
+    },
+  })
+  const byName = new Map(servers.map((server) => [server.serverName, server]))
+
+  const demo = byName.get('demo')
+  assert.equal(demo.hiddenTools, 2)
+  assert.equal(demo.hiddenTokens, 1500, 'a fractional token estimate is truncated')
+  assert.equal(demo.hiddenChars, undefined, 'a non-number is not invented')
+  assert.equal(demo.loadedTools, 0, 'zero is a real count')
+  assert.equal(demo.tools, undefined, 'the snapshot does not overwrite the live tool count')
+
+  const other = byName.get('other')
+  assert.equal('hiddenTools' in other, false)
+  assert.equal('hiddenTokens' in other, false)
+  assert.equal('hiddenChars' in other, false)
+  assert.equal(other.loadedTools, 1, 'a finite non-integer count is truncated, not dropped')
+})
+
+test('presentServer carries footprint counters only when they are finite numbers', () => {
+  const base = {
+    entryId: null,
+    id: 'x',
+    serverName: 'x',
+    transport: 'stdio',
+    target: '',
+    enabled: true,
+    fiberPhase: 'active',
+    toolCount: 2,
+  }
+  const fields = ['hiddenTools', 'hiddenTokens', 'hiddenChars', 'loadedTools']
+
+  const plain = presentServer(base)
+  for (const field of fields) assert.equal(field in plain, false, `${field} must not be invented`)
+
+  const shaped = presentServer({ ...base, hiddenTools: 2, hiddenTokens: 1500, hiddenChars: 4836, loadedTools: 0 })
+  assert.equal(shaped.hiddenTools, 2)
+  assert.equal(shaped.hiddenTokens, 1500)
+  assert.equal(shaped.hiddenChars, 4836)
+  assert.equal(shaped.loadedTools, 0)
+
+  const bad = presentServer({ ...base, hiddenTools: -1, hiddenTokens: Number.NaN, hiddenChars: Number.POSITIVE_INFINITY, loadedTools: '3' })
+  for (const field of fields) assert.equal(field in bad, false, `${field} must reject a non-finite/negative value`)
+})
+
+test('renderServerList appends the hidden footprint and the disclosure line', () => {
+  const hiddenRow = {
+    id: 'demo',
+    serverName: 'demo',
+    transport: 'stdio',
+    target: 'node',
+    enabled: true,
+    fiberPhase: 'active',
+    toolCount: 3,
+    hiddenTools: 2,
+    hiddenTokens: 1500,
+    hiddenChars: 4836,
+    loadedTools: 1,
+  }
+  const plainRow = {
+    id: 'plain',
+    serverName: 'plain',
+    transport: 'stdio',
+    target: '',
+    enabled: true,
+    fiberPhase: 'active',
+    toolCount: 0,
+  }
+
+  const text = renderServerList([hiddenRow, plainRow], { disclosure: { hiddenTools: 2, hiddenTokens: 1500 } })
+  assert.match(text, /- demo \(row demo\): running, 3 tools, 2 hidden ≈ 1\.5k tokens — stdio node/)
+  assert.match(text, /- plain \(row plain\): idle — stdio/)
+  assert.equal(text.split('\n').length, 5, 'header + two rows + footer + disclosure')
+  assert.match(
+    text,
+    /Hidden by default: 2 tools ≈ 1\.5k tokens; mcp_load makes them native, mcp_call runs one directly\./,
+  )
+
+  const small = renderServerList([{ ...hiddenRow, hiddenTools: 1, hiddenTokens: 999 }], {
+    disclosure: { hiddenTools: 1, hiddenTokens: 999 },
+  })
+  assert.match(small, /1 hidden ≈ 999 tokens/)
+  assert.match(small, /Hidden by default: 1 tools ≈ 999 tokens/)
+
+  const boundary = renderServerList([{ ...hiddenRow, hiddenTools: 1, hiddenTokens: 1000 }])
+  assert.match(boundary, /1 hidden ≈ 1\.0k tokens/)
+  assert.doesNotMatch(boundary, /Hidden by default/, 'no disclosure summary without a disclosure snapshot')
+
+  const plain = renderServerList([plainRow], { disclosure: { hiddenTools: 0, hiddenTokens: 0 } })
+  assert.doesNotMatch(plain, /hidden/, 'no per-row or summary line when nothing is hidden')
+  assert.doesNotMatch(plain, /Hidden by default/)
+})
+
+test('renderServerList names the tools kept visible, grouped and bounded', () => {
+  const plainRow = {
+    id: 'plain',
+    serverName: 'plain',
+    transport: 'stdio',
+    target: '',
+    enabled: true,
+    fiberPhase: 'active',
+    toolCount: 2,
+  }
+  const disclosure = {
+    hiddenTools: 2,
+    hiddenTokens: 100,
+    notAdopted: [
+      { name: 'mcp__demo__alpha', reason: 'always visible (config)' },
+      { name: 'mcp__demo__beta', reason: 'always visible (config)' },
+      { name: 'mcp__demo__gamma', reason: 'always visible (config)' },
+      { name: 'mcp__demo__delta', reason: 'always visible (config)' },
+      { name: 'mcp__demo__epsilon', reason: 'always visible (config)' },
+      { name: 'mcp__x__y', reason: 'unrecognized name shape' },
+      { name: 42, reason: 'task support required' },
+      null,
+      42,
+      { name: 'ignored', reason: {} },
+    ],
+  }
+  const text = renderServerList([plainRow], { disclosure })
+  const line = text.split('\n').find((candidate) => candidate.startsWith('Kept visible'))
+  assert.ok(line !== undefined, 'the model must be told why a tool stays visible')
+  assert.match(
+    line,
+    /^Kept visible \(not masked\): always visible \(config\): 5 \(mcp__demo__alpha, mcp__demo__beta, mcp__demo__gamma, \+2 more\); unrecognized name shape: 1 \(mcp__x__y\)\.$/,
+  )
+  assert.ok(line.length <= 400, `the line is bounded (length ${line.length})`)
+
+  // Malformed / absent input produces no line instead of throwing.
+  assert.doesNotMatch(renderServerList([plainRow], { disclosure: { notAdopted: [null, 42, { reason: {} }, { reason: 7 }] } }), /Kept visible/)
+  assert.doesNotMatch(renderServerList([plainRow], { disclosure: { notAdopted: [] } }), /Kept visible/)
+  assert.doesNotMatch(renderServerList([plainRow]), /Kept visible/)
+
+  const many = Array.from({ length: 30 }, (_, index) => ({
+    name: 'mcp__server__tool_' + index,
+    reason: `reason-${String(index).padStart(2, '0')}-${'x'.repeat(70)}`,
+  }))
+  const longLine = renderServerList([plainRow], { disclosure: { notAdopted: many } })
+    .split('\n')
+    .find((candidate) => candidate.startsWith('Kept visible'))
+  assert.ok(longLine !== undefined)
+  assert.ok(longLine.length <= 400, `a large snapshot stays bounded (length ${longLine.length})`)
+})
+
+test('the state route keeps the 1.4 payload shape without footprint callbacks', async (t) => {
+  const env = await createManagementEnvWithOptions({})
+  t.after(() => env.dispose())
+
+  const response = await request(env, STATE)
+  assert.equal(response.status, 200)
+  assert.equal(response.body.disclosure, null)
+  assert.equal(response.body.loaded, null)
+  const server = response.body.servers[0]
+  for (const field of ['hiddenTools', 'hiddenTokens', 'hiddenChars', 'loadedTools']) {
+    assert.equal(field in server, false, `${field} must stay absent for an older Host`)
+  }
+})
+
+test('throwing or malformed footprint callbacks degrade to null', async (t) => {
+  const throwing = await createManagementEnvWithOptions({
+    footprint() {
+      throw new Error('synthetic footprint failure')
+    },
+    loadedView() {
+      throw new Error('synthetic loaded-view failure')
+    },
+  })
+  t.after(() => throwing.dispose())
+  const response = await request(throwing, STATE)
+  assert.equal(response.status, 200, 'a data seam must never fail /state')
+  assert.equal(response.body.disclosure, null)
+  assert.equal(response.body.loaded, null)
+  for (const field of ['hiddenTools', 'hiddenTokens', 'hiddenChars', 'loadedTools']) {
+    assert.equal(field in response.body.servers[0], false)
+  }
+
+  const malformed = await createManagementEnvWithOptions({
+    footprint: () => 'not a snapshot',
+    loadedView: () => 42,
+  })
+  t.after(() => malformed.dispose())
+  const second = await request(malformed, STATE)
+  assert.equal(second.status, 200)
+  assert.equal(second.body.disclosure, null)
+  assert.equal(second.body.loaded, null)
+})
+
+test('a non-JSON-safe footprint snapshot degrades instead of failing /state', async (t) => {
+  const bigint = await createManagementEnvWithOptions({
+    footprint: () => ({ total: { hiddenTools: 1n, hiddenTokens: 2n }, byServer: {} }),
+    loadedView: () => ({ agents: [] }),
+  })
+  t.after(() => bigint.dispose())
+  const big = await request(bigint, STATE)
+  assert.equal(big.status, 200, 'a BigInt snapshot must not fail the response')
+  assert.equal(big.body.disclosure, null)
+  assert.deepEqual(big.body.loaded, { agents: [] })
+
+  const circular = { agents: [] }
+  circular.self = circular
+  const looping = await createManagementEnvWithOptions({
+    footprint: () => ({ total: { hiddenTools: 0, hiddenTokens: 0 }, byServer: {} }),
+    loadedView: () => circular,
+  })
+  t.after(() => looping.dispose())
+  const loop = await request(looping, STATE)
+  assert.equal(loop.status, 200, 'a circular loaded view must not fail the response')
+  assert.deepEqual(loop.body.disclosure, { hiddenTools: 0, hiddenTokens: 0 })
+  assert.equal(loop.body.loaded, null)
+})
+
+// ---------------------------------------------------------------------------
+// v1.6 P1 connection-layer control API (ensureServer / releaseServer).
+//
+// The fake manager toggles the row AND registers/removes that server's tools,
+// exactly like a lazy connection: the tools exist only while connected.
+// ---------------------------------------------------------------------------
+
+/** One fake MCP tool definition the fake registry can hold. */
+function lazyTool(name) {
+  return {
+    name,
+    description: `fake tool ${name}`,
+    parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+  }
+}
+
+/** A disabled MCP row for the lazy-connection fixtures. */
+function lazyRow(overrides = {}) {
+  return {
+    entryId: 'include:demo',
+    patchId: 'demo',
+    moduleName: MCP_CLIENT_MODULE,
+    enabled: false,
+    fiberPhase: null,
+    toolCount: 0,
+    readOnlyReason: null,
+    ...overrides,
+  }
+}
+
+/** One loader entry for a fake MCP row. */
+function lazyEntry(name, id = `include:${name}`) {
+  return { id, options: { config: { serverName: name, command: 'node' } } }
+}
+
+/**
+ * Management environment whose registration result the test can call.
+ *
+ * `createManagementEnvWithOptions` returns the env but not
+ * `registerServerManagement`'s return value, so this fixture builds the fake
+ * context itself and keeps both.
+ */
+async function createLazyEnv(config = {}) {
+  const { dir: temp, remove } = await makeTempDir('dsh-mcp-lazy-')
+  const home = nodePath.join(temp, 'home')
+  const profileDir = nodePath.join(temp, 'profile')
+  await fsp.mkdir(home, { recursive: true })
+  await fsp.mkdir(profileDir, { recursive: true })
+  const patchPath = nodePath.join(profileDir, 'cordis.patch.yml')
+  await fsp.writeFile(patchPath, '[]\n', 'utf8')
+
+  const tools = createFakeToolsService()
+  const rows = (config.rows ?? [lazyRow()]).map((row) => ({ ...row }))
+  const calls = []
+  const toolNames = config.toolNames ?? ['mcp__demo__tool']
+  const disposers = new Map()
+  const connect = (connected) => {
+    for (const name of toolNames) {
+      if (connected) {
+        if (!disposers.has(name)) disposers.set(name, tools.register(lazyTool(name)))
+      } else {
+        const dispose = disposers.get(name)
+        if (dispose !== undefined) {
+          dispose()
+          disposers.delete(name)
+        }
+      }
+    }
+  }
+  connect(config.startConnected === true)
+
+  const pluginManager = {
+    async listPlugins() {
+      return rows.map((row) => ({ ...row }))
+    },
+    async setPluginEnabled(id, enabled) {
+      calls.push({ id, enabled })
+      if (typeof config.mutate === 'function') {
+        const outcome = await config.mutate(rows.find((row) => row.entryId === id), enabled)
+        if (outcome !== undefined) return outcome
+      }
+      const row = rows.find((candidate) => candidate.entryId === id)
+      if (row === undefined) return { application: 'failed' }
+      row.enabled = enabled
+      row.fiberPhase = enabled ? 'active' : null
+      connect(enabled)
+      return { application: 'applied' }
+    },
+  }
+
+  const fake = createFakeContext({
+    tools,
+    services: {
+      pluginManager,
+      loader: { entries: () => config.entries ?? [lazyEntry('demo')] },
+      profileContext: { home, patchPath },
+      webServer: {
+        register(route) {
+          fake.routes.set(route.path, route.handler)
+          return () => fake.routes.delete(route.path)
+        },
+      },
+      connection: { requestRejection: () => undefined },
+      agents: { list: () => [] },
+    },
+  })
+
+  const api = registerServerManagement(fake.ctx, {
+    lazyConnect: config.lazyConnect ?? ['demo'],
+    lazyStartTimeoutMs: config.lazyStartTimeoutMs,
+    loadedView: config.loadedView,
+    footprint: config.footprint,
+  })
+  await flushMicrotasks()
+  return {
+    ...fake,
+    rows,
+    calls,
+    tools,
+    api,
+    temp,
+    patchPath,
+    connect,
+    dispose: async () => {
+      await remove()
+    },
+  }
+}
+
+test('presentServer and /state carry the lazy flag only when it is known', async (t) => {
+  const base = {
+    entryId: null,
+    id: 'x',
+    serverName: 'x',
+    transport: 'stdio',
+    target: '',
+    enabled: true,
+    fiberPhase: 'active',
+    toolCount: 2,
+  }
+  assert.equal('lazy' in presentServer(base), false, 'a pre-1.6 row keeps the old shape')
+  assert.equal(presentServer({ ...base, lazy: true }).lazy, true)
+  assert.equal(presentServer({ ...base, lazy: false }).lazy, false)
+
+  const env = await createLazyEnv({
+    rows: [
+      lazyRow({ enabled: true, fiberPhase: 'active', toolCount: 1 }),
+      lazyRow({ entryId: 'include:other', patchId: 'other', enabled: true, fiberPhase: 'active', toolCount: 0 }),
+    ],
+    entries: [lazyEntry('demo'), lazyEntry('other')],
+    lazyConnect: ['demo'],
+    startConnected: true,
+  })
+  t.after(() => env.dispose())
+
+  const response = await request(env, STATE)
+  assert.equal(response.status, 200)
+  const byName = new Map(response.body.servers.map((row) => [row.serverName, row]))
+  assert.equal(byName.get('demo').lazy, true)
+  assert.equal(byName.get('other').lazy, false)
+
+  // An empty lazy set is still a lazy-aware management half: every row is
+  // stamped `false` rather than omitting the field.
+  const empty = await createLazyEnv({ lazyConnect: [], startConnected: true })
+  t.after(() => empty.dispose())
+  const emptyState = await request(empty, STATE)
+  assert.equal(emptyState.status, 200)
+  assert.equal(emptyState.body.servers[0].lazy, false, 'an empty lazy set still stamps lazy:false')
+})
+
+test('ensureServer starts a disabled lazy row and waits for its tool', async (t) => {
+  const env = await createLazyEnv()
+  t.after(() => env.dispose())
+  assert.equal(env.rows[0].enabled, false)
+
+  const result = await env.api.ensureServer('demo', { toolName: 'mcp__demo__tool', timeoutMs: 1000 })
+  assert.deepEqual(result, { ok: true, started: true })
+  assert.equal(env.calls.length, 1, 'exactly one start')
+  assert.deepEqual(env.calls[0], { id: 'include:demo', enabled: true })
+  assert.equal(env.rows[0].enabled, true)
+  assert.equal(env.tools.definitions().some((definition) => definition.name === 'mcp__demo__tool'), true)
+})
+
+test('ensureServer on a running row is a no-op that waits for the tool', async (t) => {
+  const env = await createLazyEnv({
+    rows: [lazyRow({ enabled: true, fiberPhase: 'active', toolCount: 1 })],
+    startConnected: true,
+  })
+  t.after(() => env.dispose())
+
+  assert.deepEqual(await env.api.ensureServer('demo', { toolName: 'mcp__demo__tool', timeoutMs: 500 }), {
+    ok: true,
+    started: false,
+  })
+  assert.deepEqual(await env.api.ensureServer('demo', { timeoutMs: 500 }), { ok: true, started: false })
+  assert.equal(env.calls.length, 0, 'an already-running row is never toggled')
+})
+
+test('ensureServer reports not-lazy and unknown-server without mutating', async (t) => {
+  const env = await createLazyEnv({ lazyConnect: ['demo', 'ghost'] })
+  t.after(() => env.dispose())
+
+  assert.equal((await env.api.ensureServer('other', { toolName: 'mcp__other__tool' })).reason, 'not-lazy')
+  assert.equal((await env.api.ensureServer('ghost', { toolName: 'mcp__ghost__tool' })).reason, 'unknown-server')
+  assert.equal((await env.api.ensureServer(undefined)).reason, 'not-lazy')
+  assert.equal(env.calls.length, 0)
+  assert.equal(env.rows[0].enabled, false)
+})
+
+test('ensureServer times out when the tool never registers', async (t) => {
+  const env = await createLazyEnv()
+  t.after(() => env.dispose())
+
+  const result = await env.api.ensureServer('demo', { toolName: 'mcp__demo__missing', timeoutMs: 120 })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'timeout')
+  assert.match(result.message, /did not appear in time/)
+  assert.equal(env.calls.length, 1, 'the server was started even though the tool never appeared')
+})
+
+test('ensureServer returns failed when the start throws', async (t) => {
+  const env = await createLazyEnv({
+    mutate() {
+      throw new Error('synthetic enable failure')
+    },
+  })
+  t.after(() => env.dispose())
+
+  const result = await env.api.ensureServer('demo', { toolName: 'mcp__demo__tool', timeoutMs: 500 })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'failed')
+  assert.match(result.message, /synthetic enable failure/)
+})
+
+test('concurrent ensureServer calls toggle the row only once', async (t) => {
+  const env = await createLazyEnv()
+  t.after(() => env.dispose())
+
+  const [first, second] = await Promise.all([
+    env.api.ensureServer('demo', { toolName: 'mcp__demo__tool', timeoutMs: 2000 }),
+    env.api.ensureServer('demo', { toolName: 'mcp__demo__tool', timeoutMs: 2000 }),
+  ])
+  assert.equal(first.ok, true)
+  assert.equal(second.ok, true)
+  assert.equal(env.calls.length, 1, 'the serialized queue plus a re-read prevents a double toggle')
+  assert.equal([first.started, second.started].filter(Boolean).length, 1, 'exactly one caller started it')
+  assert.equal(env.tools.definitions().some((definition) => definition.name === 'mcp__demo__tool'), true)
+})
+
+test('releaseServer refuses while a live agent has a tool loaded', async (t) => {
+  const env = await createLazyEnv({
+    rows: [lazyRow({ enabled: true, fiberPhase: 'active', toolCount: 1 })],
+    startConnected: true,
+    loadedView: () => ({ agents: [{ id: 'agent-1', title: null, delegationDepth: 0, loaded: ['mcp__demo__tool'] }] }),
+  })
+  t.after(() => env.dispose())
+
+  assert.deepEqual(await env.api.releaseServer('demo'), { ok: false, reason: 'in-use' })
+  assert.equal(env.calls.length, 0)
+  assert.equal(env.rows[0].enabled, true, 'an in-use server must not be stopped')
+})
+
+test('releaseServer fails closed when the loaded view is unreadable', async (t) => {
+  const env = await createLazyEnv({
+    rows: [lazyRow({ enabled: true, fiberPhase: 'active', toolCount: 1 })],
+    startConnected: true,
+    // Core reports this when the live agent list cannot be read; an unknown
+    // loaded set must never be mistaken for "nothing loaded".
+    loadedView: () => ({ agents: [], unreadable: true }),
+  })
+  t.after(() => env.dispose())
+
+  assert.deepEqual(await env.api.releaseServer('demo'), { ok: false, reason: 'in-use' })
+  assert.equal(env.calls.length, 0)
+  assert.equal(env.rows[0].enabled, true, 'an unreadable loaded view must not stop the server')
+})
+
+test('releaseServer refuses while the row is still starting (1.4 valve)', async (t) => {
+  const env = await createLazyEnv({
+    rows: [lazyRow({ enabled: true, fiberPhase: 'loading', toolCount: 0 })],
+  })
+  t.after(() => env.dispose())
+
+  assert.deepEqual(await env.api.releaseServer('demo'), { ok: false, reason: 'starting' })
+  assert.equal(env.calls.length, 0)
+})
+
+test('releaseServer is a no-op for a stopped row and reports stopped for a stop', async (t) => {
+  const stopped = await createLazyEnv()
+  t.after(() => stopped.dispose())
+  assert.deepEqual(await stopped.api.releaseServer('demo'), { ok: true, stopped: false })
+  assert.equal(stopped.calls.length, 0)
+
+  const running = await createLazyEnv({
+    rows: [lazyRow({ enabled: true, fiberPhase: 'active', toolCount: 1 })],
+    startConnected: true,
+  })
+  t.after(() => running.dispose())
+  assert.deepEqual(await running.api.releaseServer('demo'), { ok: true, stopped: true })
+  assert.equal(running.calls.length, 1)
+  assert.deepEqual(running.calls[0], { id: 'include:demo', enabled: false })
+  assert.equal(running.rows[0].enabled, false)
+  assert.equal(running.tools.definitions().some((definition) => definition.name === 'mcp__demo__tool'), false)
+})
+
+test('releaseServer reports not-lazy, unknown-server and a failed stop', async (t) => {
+  const env = await createLazyEnv({ lazyConnect: ['demo', 'ghost'] })
+  t.after(() => env.dispose())
+  assert.equal((await env.api.releaseServer('other')).reason, 'not-lazy')
+  assert.equal((await env.api.releaseServer('ghost')).reason, 'unknown-server')
+  assert.equal(env.calls.length, 0)
+
+  const failing = await createLazyEnv({
+    rows: [lazyRow({ enabled: true, fiberPhase: 'active', toolCount: 1 })],
+    startConnected: true,
+    mutate() {
+      throw new Error('synthetic disable failure')
+    },
+  })
+  t.after(() => failing.dispose())
+  const result = await failing.api.releaseServer('demo')
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'failed')
+  assert.match(result.message, /synthetic disable failure/)
+})
+
+test('the registration result always exposes the control functions', async (t) => {
+  const env = await createLazyEnv({ lazyConnect: [] })
+  t.after(() => env.dispose())
+  assert.equal(typeof env.api.ensureServer, 'function')
+  assert.equal(typeof env.api.releaseServer, 'function')
+  assert.equal(typeof env.api.listServers, 'function')
+})
+
+test('listServers reports every row with status and explicit lazy flags', async (t) => {
+  const env = await createLazyEnv({
+    rows: [
+      lazyRow({ entryId: 'include:alpha', patchId: 'alpha', enabled: true, fiberPhase: 'active', toolCount: 2 }),
+      lazyRow({ entryId: 'include:beta', patchId: 'beta' }),
+      lazyRow({
+        entryId: 'include:gamma',
+        patchId: 'gamma',
+        enabled: true,
+        fiberPhase: 'failed',
+        toolCount: 0,
+        diagnostic: 'spawn ENOENT',
+      }),
+    ],
+    entries: [
+      liveEntry('include:alpha', { state: 'connected', toolCount: 2 }).entry,
+      lazyEntry('beta'),
+      lazyEntry('gamma'),
+    ],
+    lazyConnect: ['alpha'],
+  })
+  t.after(() => env.dispose())
+
+  assert.deepEqual(await env.api.listServers(), [
+    { serverName: 'alpha', enabled: true, status: 'running', lazy: true },
+    { serverName: 'beta', enabled: false, status: 'stopped', lazy: false },
+    { serverName: 'gamma', enabled: true, status: 'error', lazy: false },
+  ])
+})
+
+test('the lazy wildcard accepts every row in listServers and /state', async (t) => {
+  const env = await createLazyEnv({
+    rows: [
+      lazyRow({ entryId: 'include:alpha', patchId: 'alpha', enabled: true, fiberPhase: 'active', toolCount: 1 }),
+      lazyRow({ entryId: 'include:beta', patchId: 'beta' }),
+    ],
+    entries: [
+      liveEntry('include:alpha', { state: 'connected', toolCount: 1 }).entry,
+      lazyEntry('beta'),
+    ],
+    lazyConnect: ['*'],
+    startConnected: true,
+  })
+  t.after(() => env.dispose())
+
+  const listed = await env.api.listServers()
+  assert.deepEqual(listed.map((server) => [server.serverName, server.lazy]), [
+    ['alpha', true],
+    ['beta', true],
+  ])
+
+  const state = await request(env, STATE)
+  assert.equal(state.status, 200)
+  assert.deepEqual(state.body.servers.map((server) => [server.serverName, server.lazy]), [
+    ['alpha', true],
+    ['beta', true],
+  ])
+})
+
+test('ensureServer under the wildcard starts a disabled row and waits for its tool', async (t) => {
+  const env = await createLazyEnv({ lazyConnect: ['*'] })
+  t.after(() => env.dispose())
+
+  assert.deepEqual(await env.api.ensureServer('demo', { toolName: 'mcp__demo__tool', timeoutMs: 1000 }), {
+    ok: true,
+    started: true,
+  })
+  assert.equal(env.calls.length, 1)
+})
+
+test('releaseServer under the wildcard stops a running row', async (t) => {
+  const env = await createLazyEnv({
+    rows: [lazyRow({ enabled: true, fiberPhase: 'active', toolCount: 1 })],
+    startConnected: true,
+    lazyConnect: ['*'],
+  })
+  t.after(() => env.dispose())
+
+  assert.deepEqual(await env.api.releaseServer('demo'), { ok: true, stopped: true })
+  assert.equal(env.calls.length, 1)
+  assert.equal(env.rows[0].enabled, false)
+})
+
+test('listServers returns null (never []) and warns once when the catalogue read fails', async (t) => {
+  const env = await createLazyEnv()
+  t.after(() => env.dispose())
+  env.ctx.pluginManager.listPlugins = async () => {
+    throw new Error('synthetic catalogue failure')
+  }
+
+  assert.equal(await env.api.listServers(), null, 'a failed read is not an empty inventory')
+  assert.equal(await env.api.listServers(), null, 'repeated failures keep the poll cheap')
+  const warnings = env.logs.filter((entry) => entry.level === 'warn')
+  assert.equal(warnings.length, 1, 'one warning for repeated failures')
+  assert.match(warnings[0].message, /could not list MCP servers/)
+})
+
+test('listServers returns [] only for a verified empty inventory', async (t) => {
+  const env = await createLazyEnv()
+  t.after(() => env.dispose())
+  env.ctx.pluginManager.listPlugins = async () => []
+
+  assert.deepEqual(await env.api.listServers(), [], 'an empty array means "verified empty"')
+  assert.equal(env.logs.filter((entry) => entry.level === 'warn').length, 0)
+})
+
+test('listServers treats a malformed plugin-manager answer as a failed read', async (t) => {
+  const env = await createLazyEnv()
+  t.after(() => env.dispose())
+
+  for (const listPlugins of [async () => ({ rows: [] }), async () => null, async () => 'not a list']) {
+    env.ctx.pluginManager.listPlugins = listPlugins
+    assert.equal(await env.api.listServers(), null, 'a non-array answer must not look like an uninstall')
+  }
+  const warnings = env.logs.filter((entry) => entry.level === 'warn')
+  assert.equal(warnings.length, 1, 'one warning across repeated malformed reads')
+})
+
+test('the mcp_servers tool computes the footprint for the executing agent only', async (t) => {
+  const seen = []
+  const env = await createManagementEnvWithOptions({
+    footprint(agent) {
+      seen.push(agent)
+      return footprintSnapshot()
+    },
+    loadedView: () => ({ agents: [] }),
+    lazyConnect: ['demo'],
+  })
+  t.after(() => env.dispose())
+
+  const definition = env.ctx.tools.definitions().find((candidate) => candidate.name === 'mcp_servers')
+  assert.ok(definition, 'mcp_servers must be registered')
+
+  const agent = { id: 'agent-42' }
+  const text = await definition.execute({}, { agent })
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0], agent)
+  assert.match(text, /2 hidden ≈ 1\.5k tokens/)
+  assert.match(text, /, lazy, 2 hidden/, 'the mcp_servers answer marks a lazy row')
+  assert.match(text, /Hidden by default: 2 tools ≈ 1\.5k tokens/)
+  assert.match(text, /Kept visible \(not masked\): always visible \(config\): 1 \(mcp__demo__alpha\)\./)
+
+  // No notAdopted in the snapshot: the disclosure lines appear, the kept-visible
+  // line does not.
+  const without = await createManagementEnvWithOptions({
+    footprint: () => ({ total: { hiddenTools: 1, hiddenTokens: 10 }, byServer: {} }),
+    loadedView: () => ({ agents: [] }),
+  })
+  t.after(() => without.dispose())
+  const noKept = await without.ctx.tools
+    .definitions()
+    .find((candidate) => candidate.name === 'mcp_servers')
+    .execute({}, { agent })
+  assert.match(noKept, /Hidden by default: 1 tools ≈ 10 tokens/)
+  assert.doesNotMatch(noKept, /Kept visible/)
+
+  // A direct call with no execution context keeps the pre-1.5 list.
+  const plain = await definition.execute({})
+  assert.equal(seen.length, 1, 'no exec means no footprint read')
+  assert.doesNotMatch(plain, /hidden/)
+  assert.doesNotMatch(plain, /Kept visible/)
 })

@@ -277,7 +277,10 @@ test('no query still lists servers and tools (S9)', () => {
   assert.equal(result.entries.length, 12, 'the configured page size applies')
   assert.equal(result.matched, 210)
   const text = renderSearch(result, { hiddenCount: 210 })
-  assert.match(text, /MCP servers: bilibili \(31 tools\), blender \(9 tools\), rea \(170 tools\)/)
+  assert.match(text, /MCP servers \(3\) — pass server:"name" to narrow:/)
+  assert.match(text, /- bilibili: 31 tools, 0 loaded, 0 hidden/)
+  assert.match(text, /- blender: 9 tools, 0 loaded, 0 hidden/)
+  assert.match(text, /- rea: 170 tools, 0 loaded, 0 hidden/)
   assert.match(text, /Showing 12 of 210 tools/)
 })
 
@@ -367,8 +370,150 @@ test('rendered matches carry count, loaded marker and truncation hint', () => {
   const loaded = new Set([result.entries[0].name])
   const text = renderSearch(result, { loadedNames: loaded, hiddenCount: 0, summaryChars: 40 })
   assert.match(text, /Matches \d+ of 210:/)
-  assert.match(text, new RegExp(`- ${result.entries[0].name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.* \\[loaded\\]`))
+  assert.match(text, new RegExp(`- ${result.entries[0].name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*\\[loaded\\]`))
   assert.match(text, /more not shown; narrow the query or raise limit up to 40/)
+})
+
+// ---------------------------------------------------------------------------
+// v1.5: hit explanation, per-server disclosure and kept-visible reasons.
+// ---------------------------------------------------------------------------
+
+test('scoreEntry reports the field that produced the best hit', () => {
+  const nameHit = scoreEntry(
+    entry('rea', 'capture_web_screenshot', 'Capture a screenshot of a web page'),
+    tokenize('screenshot'),
+    'screenshot',
+  )
+  assert.equal(nameHit.matched, 1)
+  assert.deepEqual(nameHit.fields, ['name'], 'a tool-name hit is tagged name')
+
+  const descHit = scoreEntry(
+    { name: 'mcp__tool__alpha', tool: 'alpha', server: 'tool', description: 'captures a screenshot' },
+    tokenize('screenshot'),
+    'screenshot',
+  )
+  assert.deepEqual(descHit.fields, ['desc'])
+
+  const serverHit = scoreEntry(
+    { name: 'alpha', tool: 'alpha', server: 'screenshot', description: 'unrelated' },
+    tokenize('screenshot'),
+    'screenshot',
+  )
+  assert.deepEqual(serverHit.fields, ['server'])
+})
+
+test('matchedFields are deduped and keep name > server > desc order', () => {
+  const target = { name: 'mcp__srv__search', tool: 'search', server: 'srv', description: 'browser helper' }
+  assert.deepEqual(scoreEntry(target, tokenize('browser search'), 'browser search').fields, ['name', 'desc'])
+  // Token order in the query must not change the tag order.
+  assert.deepEqual(scoreEntry(target, tokenize('search browser'), 'search browser').fields, ['name', 'desc'])
+})
+
+test('matches order name > server > description', () => {
+  const catalog = [
+    { name: 'alpha', tool: 'alpha', server: 'zebra', description: 'unrelated', parameters: { type: 'object' }, signature: '' },
+    { name: 'beta', tool: 'beta', server: 'other', description: 'zebra appears here', parameters: { type: 'object' }, signature: '' },
+    { name: 'mcp__zebra__thing', tool: 'thing', server: 'zebra', description: 'unrelated', parameters: { type: 'object' }, signature: '' },
+  ]
+  const result = rankCatalog(catalog, { query: 'zebra' })
+  assert.deepEqual(namesOf(result), ['mcp__zebra__thing', 'alpha', 'beta'])
+  assert.deepEqual(result.entries.map((item) => item.matchedFields), [['name'], ['server'], ['desc']])
+})
+
+test('rankCatalog copies page entries with matchedFields and never mutates the catalog', () => {
+  const first = entry('rea', 'capture_web_screenshot', 'Capture a screenshot of a page')
+  const second = entry('blender', 'render_scene', 'Render the scene')
+  const catalog = [first, second]
+  const before = JSON.stringify(catalog)
+  const result = rankCatalog(catalog, { query: 'screenshot' })
+  assert.equal(result.entries.length, 1)
+  assert.deepEqual(result.entries[0].matchedFields, ['name'])
+  assert.notEqual(result.entries[0], first, 'the page holds a copy, not the caller entry')
+  assert.equal('matchedFields' in first, false, 'the caller entry is untouched')
+  assert.equal(JSON.stringify(catalog), before, 'the whole catalog is unchanged')
+})
+
+test('rendered matches tag matched fields before the loaded marker', () => {
+  const target = entry('rea', 'capture_web_screenshot', 'Capture a screenshot')
+  const result = rankCatalog([target], { query: 'screenshot' })
+  const text = renderSearch(result, { loadedNames: new Set([target.name]), hiddenCount: 0 })
+  assert.match(
+    text,
+    /- mcp__rea__capture_web_screenshot\(capture_web_screenshot\?: string\) \[name\]\[loaded\] — Capture a screenshot/,
+  )
+
+  const plain = renderSearch(rankCatalog([target], { query: '' }), {})
+  assert.doesNotMatch(plain, /\[name\]/, 'an empty query matches every tool, so no field tags are printed')
+})
+
+test('empty query lists each server with loaded and hidden counts parsed from the names', () => {
+  const result = rankCatalog(CATALOG, { query: '', limit: 1 })
+  const loaded = new Set(
+    CATALOG.filter((item) => item.server === 'rea')
+      .slice(0, 2)
+      .map((item) => item.name),
+  )
+  const hidden = new Set(
+    CATALOG.filter((item) => item.server === 'rea' && !loaded.has(item.name)).map((item) => item.name),
+  )
+  const text = renderSearch(result, {
+    loadedNames: loaded,
+    hiddenNames: hidden,
+    hiddenCount: countHidden(result.availableNames, hidden),
+  })
+  assert.match(text, /MCP servers \(3\) — pass server:"name" to narrow:/)
+  assert.match(text, /- rea: 170 tools, 2 loaded, 168 hidden/)
+  assert.match(text, /- bilibili: 31 tools, 0 loaded, 0 hidden/)
+  assert.match(text, /- blender: 9 tools, 0 loaded, 0 hidden/)
+  assert.match(text, /Hidden until loaded: 168 of 210 tools/)
+})
+
+test('the per-server list respects a custom tool-name prefix', () => {
+  const entries = [
+    { name: 'x__srv__tool', server: 'srv', tool: 'tool', description: 'one', parameters: { type: 'object' }, signature: '' },
+    { name: 'x__other__tool', server: 'other', tool: 'tool', description: 'two', parameters: { type: 'object' }, signature: '' },
+  ]
+  const text = renderSearch(rankCatalog(entries, { query: '' }), { prefix: 'x__' })
+  assert.match(text, /- other: 1 tools, 0 loaded, 0 hidden/)
+  assert.match(text, /- srv: 1 tools, 0 loaded, 0 hidden/)
+})
+
+test('not-adopted tools are disclosed in one grouped line with stable reason order', () => {
+  const text = renderSearch(rankCatalog(CATALOG, { query: '', limit: 1 }), {
+    // Deliberately out of canonical order: the line sorts by reason.
+    notAdopted: [
+      { name: 'mcp__y__c', reason: 'always visible (config)' },
+      { name: 'mcp__x__a', reason: 'task support required' },
+      { name: 'mcp__x__b', reason: 'task support required' },
+    ],
+  })
+  assert.match(
+    text,
+    /Kept visible \(not masked\): task support required: 2 \(mcp__x__a, mcp__x__b\); always visible \(config\): 1 \(mcp__y__c\)\./,
+  )
+})
+
+test('the kept-visible line caps names per reason and total length', () => {
+  const notAdopted = []
+  for (let index = 0; index < 20; index += 1) {
+    notAdopted.push({ name: `mcp__srv__very_long_tool_name_${index}_${'x'.repeat(40)}`, reason: 'task support required' })
+  }
+  for (let index = 0; index < 5; index += 1) {
+    notAdopted.push({ name: `mcp__other__${'y'.repeat(50)}${index}`, reason: 'always visible (config)' })
+  }
+  const text = renderSearch(rankCatalog(CATALOG, { query: '', limit: 1 }), { notAdopted })
+  const line = text.split('\n').find((entry) => entry.startsWith('Kept visible'))
+  assert.ok(line !== undefined, 'the line is printed')
+  assert.ok(line.length <= 400, `the line must stay bounded, got ${line.length}`)
+  assert.equal(line.includes('very_long_tool_name_3'), false, 'only three names per reason are listed')
+  assert.match(line, /\+17 more/)
+})
+
+test('kept-visible disclosure also appears on a non-empty search', () => {
+  const text = renderSearch(rankCatalog(CATALOG, { query: 'screenshot', limit: 2 }), {
+    notAdopted: [{ name: 'mcp__x__a', reason: 'task support required' }],
+  })
+  assert.match(text, /Kept visible \(not masked\): task support required: 1 \(mcp__x__a\)\./)
 })
 
 // ---------------------------------------------------------------------------

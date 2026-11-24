@@ -119,6 +119,11 @@ const toggleButton = (tree) => findNode(tree, (node) => node.props && node.props
 const restartButton = (tree) => findNode(tree, (node) => node.props && node.props.className === 'dsh-mcp-icon-btn')
 const detailLine = (tree) => byClass(tree, 'dsh-mcp-card-detail')
 const liveRegion = (tree) => findNode(tree, (node) => node.props && node.props['aria-live'] === 'polite')
+const batchButton = (tree, action) =>
+  findNode(
+    tree,
+    (node) => node.props && typeof node.props.className === 'string' && node.props.className.includes('dsh-mcp-batch-' + action),
+  )
 
 test('a failed action stays visible after a following successful poll', async () => {
   const fetch = async (url, init) => {
@@ -932,6 +937,402 @@ test('a pending action wins over the hazard hint when the row turns starting', a
     await stopping
     await flushMicrotasks()
     assert.equal(toggleButton(mounted.panel.render()).props.disabled, true, 'the row is still starting')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// v1.5 hidden-footprint block, status filter and batch controls.
+// ---------------------------------------------------------------------------
+
+/** A state body with the v1.5 disclosure/loaded snapshots attached. */
+function disclosureState(servers, disclosure, loaded) {
+  return stateBody(servers, { disclosure, loaded })
+}
+
+test('the disclosure block summarizes this window and lists the loaded agents', async () => {
+  const disclosure = {
+    tools: 40,
+    hiddenTools: 7,
+    hiddenTokens: 1500,
+    hiddenChars: 4836,
+    // The panel snapshot is cold (no agent): the live loaded view must win.
+    loadedTools: 0,
+    notAdopted: [
+      { name: 'mcp__rea__always', reason: 'always visible (config)' },
+      { name: 'mcp__bili__always', reason: 'always visible (config)' },
+      { name: 'mcp__rea__task', reason: 'task support required' },
+      { name: 'mcp__x__task', reason: 'task support required' },
+      { name: 'mcp__y__shape', reason: 'unrecognized name shape' },
+      { name: 'mcp__z__shape', reason: 'unrecognized name shape' },
+      { name: 'mcp__w__other', reason: 'repeated name' },
+    ],
+  }
+  const loaded = {
+    agents: [
+      { id: 'agent-1', title: null, delegationDepth: 0, loaded: ['mcp__rea__search', 'mcp__rea__capture_web_screenshot'] },
+      { id: 'agent-2', title: 'Research worker', delegationDepth: 1, loaded: ['mcp__bili__video'] },
+    ],
+  }
+  const mounted = mountPanel({ fetch: async () => response(disclosureState([serverRow()], disclosure, loaded)) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    const block = byClass(tree, 'dsh-mcp-disclosure')
+    assert.ok(block !== undefined, 'a non-empty snapshot must render the disclosure block')
+
+    const summary = byClass(tree, 'dsh-mcp-disclosure-summary')
+    assert.equal(textOf(summary), 'By default: 7 hidden ≈ 1.5k tokens · 3 loaded in this window')
+
+    const details = findNode(block, (node) => node.type === 'details')
+    assert.ok(details !== undefined, 'loaded agents live in a collapsible block')
+    assert.equal(textOf(findNode(details, (node) => node.type === 'summary')), 'Loaded in this window (3 tools)')
+    const agentLines = allByClass(tree, 'dsh-mcp-disclosure-agent')
+    assert.equal(agentLines.length, 2)
+    assert.match(textOf(agentLines[0]), /agent-1: mcp__rea__search, mcp__rea__capture_web_screenshot/)
+    assert.match(textOf(agentLines[1]), /Research worker: mcp__bili__video/)
+
+    const kept = allByClass(tree, 'dsh-mcp-disclosure-kept')
+    assert.deepEqual(kept.map(textOf), [
+      'Kept visible: always visible (config) (2)',
+      'Kept visible: task support required (2)',
+      'Kept visible: unrecognized name shape (2)',
+    ])
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a loaded agent line caps at 12 tool names and counts the rest', async () => {
+  const names = Array.from({ length: 14 }, (_, index) => 'mcp__rea__tool_' + index)
+  const mounted = mountPanel({
+    fetch: async () => response(disclosureState([serverRow()], { hiddenTools: 1, hiddenTokens: 10 }, {
+      agents: [{ id: 'agent-1', title: null, delegationDepth: 0, loaded: names }],
+    })),
+  })
+  try {
+    await flushMicrotasks()
+    const line = byClass(mounted.panel.render(), 'dsh-mcp-disclosure-agent')
+    assert.ok(line !== undefined)
+    const text = textOf(line)
+    assert.match(text, /mcp__rea__tool_11/)
+    assert.doesNotMatch(text, /mcp__rea__tool_12/)
+    assert.match(text, / \+2 more$/)
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('the loaded summary falls back to disclosure.loadedTools without a loaded view', async () => {
+  const mounted = mountPanel({
+    fetch: async () => response(disclosureState([serverRow()], { hiddenTools: 3, hiddenTokens: 900, loadedTools: 2 }, null)),
+  })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    assert.equal(textOf(byClass(tree, 'dsh-mcp-disclosure-summary')), 'By default: 3 hidden ≈ 900 tokens · 2 loaded in this window')
+    assert.equal(findNode(tree, (node) => node.type === 'details'), undefined, 'no loaded agents, no collapsible block')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('the loaded summary counts a tool loaded by two agents once', async () => {
+  const loaded = {
+    agents: [
+      { id: 'a', title: null, delegationDepth: 0, loaded: ['mcp__rea__search', 'mcp__rea__capture'] },
+      { id: 'b', title: null, delegationDepth: 0, loaded: ['mcp__rea__capture'] },
+    ],
+  }
+  const mounted = mountPanel({
+    fetch: async () => response(disclosureState([serverRow()], { hiddenTools: 0, hiddenTokens: 0 }, loaded)),
+  })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    assert.equal(textOf(byClass(tree, 'dsh-mcp-disclosure-summary')), 'By default: 0 hidden ≈ 0 tokens · 2 loaded in this window')
+    const summary = findNode(tree, (node) => node.type === 'summary')
+    assert.equal(textOf(summary), 'Loaded in this window (2 tools)')
+    assert.equal(allByClass(tree, 'dsh-mcp-disclosure-agent').length, 2, 'the per-agent list still shows both agents')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('an older Host payload has no disclosure block and keeps the 1.4 meta line', async () => {
+  const mounted = mountPanel({ fetch: async () => response(stateBody([serverRow({ live: null, statusDetail: null })])) })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    assert.equal(byClass(tree, 'dsh-mcp-disclosure'), undefined)
+    assert.equal(textOf(byClass(tree, 'dsh-mcp-card-desc')), 'stdio · node server.js · 2 tools')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a card appends its hidden tool count and token estimate', async () => {
+  const mounted = mountPanel({
+    fetch: async () => response(stateBody([serverRow({ hiddenTools: 5, hiddenTokens: 1600 })])),
+  })
+  try {
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    assert.equal(
+      textOf(byClass(tree, 'dsh-mcp-card-desc')),
+      'stdio · node server.js · 2 tools · 5 hidden by default ≈ 1.6k tokens',
+    )
+    assert.equal(byClass(tree, 'dsh-mcp-disclosure'), undefined, 'per-server data alone does not open the block')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('the status filter renders only matching cards and survives a poll', async () => {
+  const rows = [
+    serverRow(),
+    serverRow({ entryId: 'include:off', id: 'off', serverName: 'off', enabled: false, status: 'stopped' }),
+    serverRow({ entryId: 'include:bad', id: 'bad', serverName: 'bad', status: 'error', diagnostic: 'boom' }),
+  ]
+  const mounted = mountPanel({ fetch: async () => response(stateBody(rows)) })
+  try {
+    await flushMicrotasks()
+    let tree = mounted.panel.render()
+    let select = byClass(tree, 'dsh-mcp-filter')
+    assert.ok(select !== undefined, 'the toolbar must carry a status filter')
+    assert.equal(select.props['aria-label'], 'Filter by status')
+    const options = findAll(select, (node) => node.type === 'option')
+    assert.deepEqual(options.map((option) => option.props.value), ['all', 'running', 'stopped', 'error'])
+    assert.deepEqual(options.map(textOf), ['All', 'running', 'stopped', 'error'])
+    assert.equal(allByClass(tree, 'dsh-mcp-card').length, 3)
+
+    select.props.onChange({ target: { value: 'stopped' } })
+    tree = mounted.panel.render()
+    let cards = allByClass(tree, 'dsh-mcp-card')
+    assert.equal(cards.length, 1)
+    assert.match(textOf(cards[0]), /off/)
+
+    await mounted.panel.poll()
+    await flushMicrotasks()
+    assert.equal(allByClass(mounted.panel.render(), 'dsh-mcp-card').length, 1, 'the filter is not reset by a poll')
+
+    byClass(mounted.panel.render(), 'dsh-mcp-filter').props.onChange({ target: { value: 'all' } })
+    cards = allByClass(mounted.panel.render(), 'dsh-mcp-card')
+    assert.equal(cards.length, 3)
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a filter that matches nothing shows the filtered-empty note and disables batch', async () => {
+  const running = serverRow()
+  const stopped = serverRow({ entryId: 'include:off', id: 'off', serverName: 'off', enabled: false, status: 'stopped' })
+  let rows = [running, stopped]
+  const mounted = mountPanel({ fetch: async () => response(stateBody(rows)) })
+  try {
+    await flushMicrotasks()
+    byClass(mounted.panel.render(), 'dsh-mcp-filter').props.onChange({ target: { value: 'stopped' } })
+    assert.equal(allByClass(mounted.panel.render(), 'dsh-mcp-card').length, 1)
+
+    // The row that justified the filter disappears on the next poll.
+    rows = [running]
+    await mounted.panel.poll()
+    await flushMicrotasks()
+    const tree = mounted.panel.render()
+    assert.equal(allByClass(tree, 'dsh-mcp-card').length, 0)
+    const empty = byClass(tree, 'dsh-mcp-empty')
+    assert.ok(empty !== undefined, 'an empty filtered list needs an explanation')
+    assert.equal(textOf(empty), 'No servers match this filter.')
+    assert.equal(byClass(tree, 'dsh-mcp-filter').props.value, 'stopped', 'the selection stays visible')
+    assert.equal(batchButton(tree, 'stop').props.disabled, true)
+    assert.equal(batchButton(tree, 'restart').props.disabled, true)
+
+    byClass(tree, 'dsh-mcp-filter').props.onChange({ target: { value: 'all' } })
+    const restored = mounted.panel.render()
+    assert.equal(allByClass(restored, 'dsh-mcp-card').length, 1)
+    assert.equal(batchButton(restored, 'stop').props.disabled, false)
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('the card hidden line and the filtered-empty note are localized', async () => {
+  const row = serverRow({ hiddenTools: 5, hiddenTokens: 1600 })
+  const mounted = mountPanel({ locale: { active: 'zh' }, fetch: async () => response(stateBody([row])) })
+  try {
+    await flushMicrotasks()
+    assert.match(textOf(byClass(mounted.panel.render(), 'dsh-mcp-card-desc')), /默认隐藏 5 个 ≈ 1\.6k tokens/)
+    byClass(mounted.panel.render(), 'dsh-mcp-filter').props.onChange({ target: { value: 'stopped' } })
+    assert.equal(textOf(byClass(mounted.panel.render(), 'dsh-mcp-empty')), '没有符合筛选条件的服务器。')
+    assert.equal(batchButton(mounted.panel.render(), 'stop').props.disabled, true)
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a lazy row carries a localized marker in the existing meta line', async () => {
+  const mounted = mountPanel({ fetch: async () => response(stateBody([serverRow({ lazy: true })])) })
+  try {
+    await flushMicrotasks()
+    assert.equal(
+      textOf(byClass(mounted.panel.render(), 'dsh-mcp-card-desc')),
+      'stdio · node server.js · 2 tools · lazy',
+    )
+  } finally {
+    mounted.panel.unmount()
+  }
+
+  const zh = mountPanel({ locale: { active: 'zh' }, fetch: async () => response(stateBody([serverRow({ lazy: true })])) })
+  try {
+    await flushMicrotasks()
+    assert.match(textOf(byClass(zh.panel.render(), 'dsh-mcp-card-desc')), /个工具 · 按需$/)
+  } finally {
+    zh.panel.unmount()
+  }
+})
+
+test('a non-lazy row keeps the exact pre-1.6 meta line', async () => {
+  const mounted = mountPanel({ fetch: async () => response(stateBody([serverRow({ lazy: false })])) })
+  try {
+    await flushMicrotasks()
+    assert.equal(textOf(byClass(mounted.panel.render(), 'dsh-mcp-card-desc')), 'stdio · node server.js · 2 tools')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('batch stop posts one toggle per eligible row and counts skipped rows', async () => {
+  const rows = [
+    serverRow(),
+    serverRow({ entryId: 'include:idle', id: 'idle', serverName: 'idle', status: 'idle', toolCount: 0 }),
+    serverRow({ entryId: 'include:start', id: 'start', serverName: 'start', status: 'starting', toolCount: 0, live: { state: 'connecting' } }),
+    serverRow({ entryId: 'include:off', id: 'off', serverName: 'off', enabled: false, status: 'stopped' }),
+    serverRow({ entryId: 'include:bye', id: 'bye', serverName: 'bye', status: 'stopping' }),
+  ]
+  const posts = []
+  const fetch = async (url, init) => {
+    if (init !== undefined && init.method === 'POST') {
+      posts.push({ url, body: JSON.parse(init.body) })
+      return response(stateBody(rows))
+    }
+    return response(stateBody(rows))
+  }
+  const mounted = mountPanel({ fetch })
+  try {
+    await flushMicrotasks()
+    const done = batchButton(mounted.panel.render(), 'stop').props.onClick()
+    await done
+    await flushMicrotasks()
+
+    assert.deepEqual(posts.map((post) => post.url), [TOGGLE_URL, TOGGLE_URL], 'only the running and idle rows')
+    assert.deepEqual(posts.map((post) => post.body), [
+      { entryId: 'include:rea', enabled: false },
+      { entryId: 'include:idle', enabled: false },
+    ])
+    const live = liveRegion(mounted.panel.render())
+    assert.match(textOf(live), /Done: 2 applied, 0 failed, 3 skipped/)
+    assert.equal(live.props['data-tone'], 'info')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('batch restart posts one restart per eligible row and skips stopped+disabled rows', async () => {
+  const rows = [
+    serverRow(),
+    serverRow({ entryId: 'include:bad', id: 'bad', serverName: 'bad', status: 'error', live: { state: 'failed', reason: 'gave-up' } }),
+    serverRow({ entryId: 'include:start', id: 'start', serverName: 'start', status: 'starting', toolCount: 0, live: { state: 'connecting' } }),
+    serverRow({ entryId: 'include:off', id: 'off', serverName: 'off', enabled: false, status: 'stopped' }),
+  ]
+  const posts = []
+  const fetch = async (url, init) => {
+    if (init !== undefined && init.method === 'POST') {
+      posts.push({ url, body: JSON.parse(init.body) })
+      return response(stateBody(rows))
+    }
+    return response(stateBody(rows))
+  }
+  const mounted = mountPanel({ fetch })
+  try {
+    await flushMicrotasks()
+    await batchButton(mounted.panel.render(), 'restart').props.onClick()
+    await flushMicrotasks()
+
+    assert.deepEqual(posts.map((post) => post.url), [RESTART_URL, RESTART_URL])
+    assert.deepEqual(posts.map((post) => post.body), [
+      { entryId: 'include:rea' },
+      { entryId: 'include:bad' },
+    ])
+    assert.match(textOf(liveRegion(mounted.panel.render())), /Done: 2 applied, 0 failed, 2 skipped/)
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('a failed batch request is counted and makes the outcome an error', async () => {
+  const rows = [
+    serverRow(),
+    serverRow({ entryId: 'include:bad', id: 'bad', serverName: 'bad', status: 'error', live: { state: 'failed', reason: 'gave-up' } }),
+    serverRow({ entryId: 'include:start', id: 'start', serverName: 'start', status: 'starting', toolCount: 0, live: { state: 'connecting' } }),
+  ]
+  const fetch = async (url, init) => {
+    if (init !== undefined && init.method === 'POST') {
+      const body = JSON.parse(init.body)
+      if (body.entryId === 'include:bad') throw new Error('SYNTHETIC batch failure')
+      return response(stateBody(rows))
+    }
+    return response(stateBody(rows))
+  }
+  const mounted = mountPanel({ fetch })
+  try {
+    await flushMicrotasks()
+    await batchButton(mounted.panel.render(), 'restart').props.onClick()
+    await flushMicrotasks()
+    const live = liveRegion(mounted.panel.render())
+    assert.match(textOf(live), /Done: 1 applied, 1 failed, 1 skipped/)
+    assert.equal(live.props['data-tone'], 'error')
+  } finally {
+    mounted.panel.unmount()
+  }
+})
+
+test('batch buttons stay disabled while any row is pending', async () => {
+  const rows = [
+    serverRow(),
+    serverRow({ entryId: 'include:two', id: 'two', serverName: 'two' }),
+  ]
+  const releases = []
+  const fetch = (url, init) => {
+    if (init !== undefined && init.method === 'POST') {
+      return new Promise((resolve) => {
+        releases.push(() => resolve(response(stateBody(rows))))
+      })
+    }
+    return Promise.resolve(response(stateBody(rows)))
+  }
+  const mounted = mountPanel({ fetch })
+  try {
+    await flushMicrotasks()
+    const done = batchButton(mounted.panel.render(), 'stop').props.onClick()
+
+    let tree = mounted.panel.render()
+    assert.equal(batchButton(tree, 'stop').props.disabled, true)
+    assert.equal(batchButton(tree, 'restart').props.disabled, true)
+
+    releases[0]()
+    await flushMicrotasks()
+    assert.equal(releases.length, 2, 'the next request starts only after the first settles')
+    tree = mounted.panel.render()
+    assert.equal(batchButton(tree, 'stop').props.disabled, true, 'the remaining row keeps the buttons disabled')
+
+    releases[1]()
+    await done
+    await flushMicrotasks()
+    tree = mounted.panel.render()
+    assert.equal(batchButton(tree, 'stop').props.disabled, false)
+    assert.equal(batchButton(tree, 'restart').props.disabled, false)
+    assert.match(textOf(liveRegion(tree)), /Done: 2 applied, 0 failed, 0 skipped/)
   } finally {
     mounted.panel.unmount()
   }

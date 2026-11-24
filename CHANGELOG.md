@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.6.0] - 2026-11-25
+
+GitHub-only release. The npm package remains at 1.2.0.
+
+### Added
+
+- Search by server, see match reasons and estimated hidden schema size, and inspect loaded tools in the panel. Filter servers by status before a batch stop or restart.
+- Configure `lazyConnect` to cache managed servers’ tool definitions and start a stopped server on demand. `autoPrimeMs` controls initial caching; `warmIdleMs` controls idle shutdown. Loaded tools and in-flight calls suppress the idle timer.
+
+### Changed
+
+- Documented request usage for three ways of calling the same read-only tool twice on Astra. Direct calls took 4 model requests, keeping the tool loaded took 5, and toggling took 7. One run per strategy, with different starting contexts; actual charges are unknown. See [usage totals](README.md#measured-usage-direct-call-load-and-keep-or-toggle).
+
 ## [1.4.0] - 2026-11-19
 
 Distribution: 1.4.0 is distributed from GitHub as the tag/release (`v1.4.0`);
@@ -321,7 +336,7 @@ Changed:
 - A short system-prompt section advertises the hidden MCP catalog and how to
   search it.
 - README now documents five tools (with `manageServers`), the
-  prompt-length × cache-price-difference cost model with one measured example,
+  historical load-cost guidance (superseded in v1.6.0),
   the route and patch security contract, `npm test` / `scripts/repro-review.mjs`
   / `scripts/live-boot.mjs`, and the deferred items below.
 - `docs/fix-map.md` and `docs/security.md` record the review-item → fix → test

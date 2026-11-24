@@ -25,6 +25,8 @@ window.__ModuleLoader__.load({
     // aborted at this deadline so the next poll can try again.
     const REQUEST_TIMEOUT_MS = 10_000
     const NS = 'dshMcpServers'
+    // One agent line lists at most this many tools, then "+N more".
+    const LOADED_NAME_LIMIT = 12
 
     const DICT = {
       en: {
@@ -33,6 +35,7 @@ window.__ModuleLoader__.load({
         description: 'Start, stop or restart the MCP servers configured for this profile. The choice is persisted (profile patch, or the home patch for home-inserted rows) and applies to every session.',
         countUnit: 'servers',
         toolsUnit: 'tools',
+        lazy: 'lazy',
         empty: 'No MCP servers are configured for this profile.',
         loading: 'Loading MCP servers…',
         failure: 'Could not load MCP servers',
@@ -45,6 +48,16 @@ window.__ModuleLoader__.load({
         stopping: 'Stopping…',
         restarting: 'Restarting…',
         switchLabel: 'MCP server availability',
+        'disclosure.summary': 'By default: {hidden} hidden ≈ {tokens} tokens · {loaded} loaded in this window',
+        'disclosure.loadedAgents': 'Loaded in this window ({count} tools)',
+        'disclosure.kept': 'Kept visible: {reason} ({count})',
+        'card.hidden': '{hidden} hidden by default ≈ {tokens} tokens',
+        'filter.label': 'Filter by status',
+        'filter.all': 'All',
+        'filter.empty': 'No servers match this filter.',
+        'batch.stop': 'Stop shown',
+        'batch.restart': 'Restart shown',
+        'batch.done': 'Done: {applied} applied, {failed} failed, {skipped} skipped',
         'hazard.starting': 'Wait for the server to finish starting before stopping or restarting it',
         'action.done': 'Done',
         'action.restartRequired': 'Saved — restart DeepSeek Harness to apply',
@@ -71,6 +84,7 @@ window.__ModuleLoader__.load({
         description: '启动、停止或重启当前 profile 配置的 MCP 服务器；选择会持久化（profile 补丁；home 层插入的行写入 home 补丁）并对所有会话生效。',
         countUnit: '个',
         toolsUnit: '个工具',
+        lazy: '按需',
         empty: '当前 profile 没有配置 MCP 服务器。',
         loading: '正在加载 MCP 服务器…',
         failure: '无法加载 MCP 服务器',
@@ -83,6 +97,16 @@ window.__ModuleLoader__.load({
         stopping: '停止中…',
         restarting: '重启中…',
         switchLabel: 'MCP 服务器可用性',
+        'disclosure.summary': '默认隐藏 {hidden} 个 ≈ {tokens} tokens · 本窗口已加载 {loaded} 个',
+        'disclosure.loadedAgents': '本窗口已加载（{count} 个工具）',
+        'disclosure.kept': '保持可见：{reason}（{count}）',
+        'card.hidden': '默认隐藏 {hidden} 个 ≈ {tokens} tokens',
+        'filter.label': '按状态筛选',
+        'filter.all': '全部',
+        'filter.empty': '没有符合筛选条件的服务器。',
+        'batch.stop': '停止当前列表',
+        'batch.restart': '重启当前列表',
+        'batch.done': '完成：{applied} 个已应用，{failed} 个失败，{skipped} 个跳过',
         'hazard.starting': '启动完成后再停止或重启',
         'action.done': '已完成',
         'action.restartRequired': '已保存，需重启 DeepSeek Harness 后生效',
@@ -145,6 +169,15 @@ window.__ModuleLoader__.load({
 .dsh-mcp-action{margin:0;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12);overflow-wrap:anywhere}
 .dsh-mcp-action:not(:empty){padding:10px 12px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform)}
 .dsh-mcp-action[data-tone=error]:not(:empty){border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 35%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent);color:var(--dsw-alias-label-primary)}
+.dsh-mcp-disclosure{display:flex;flex-direction:column;gap:4px;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12)}
+.dsh-mcp-disclosure-summary{margin:0;color:var(--dsw-alias-label-primary)}
+.dsh-mcp-disclosure-loaded{margin:0}
+.dsh-mcp-disclosure-loaded summary{cursor:pointer;color:var(--dsw-alias-label-secondary)}
+.dsh-mcp-disclosure-agent{margin:4px 0 0;overflow-wrap:anywhere}
+.dsh-mcp-disclosure-kept{margin:0;color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere}
+.dsh-mcp-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.dsh-mcp-filter{box-sizing:border-box;height:28px;padding:0 8px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12)}
+.dsh-mcp-filter:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
 .dsh-mcp-btn{box-sizing:border-box;display:inline-flex;flex:none;align-items:center;justify-content:center;gap:4px;height:28px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);cursor:pointer}
 .dsh-mcp-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .dsh-mcp-btn:active:not(:disabled){background:var(--dsw-alias-interactive-bg-active)}
@@ -338,6 +371,45 @@ window.__ModuleLoader__.load({
       return typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : null
     }
 
+    /** A non-negative whole number from the wire, or `null` when absent/invalid. */
+    function countOf(value) {
+      const count = integerOf(value)
+      return count === null || count < 0 ? null : count
+    }
+
+    /** Token estimate for the disclosure summary and the per-card line. */
+    function tokenText(value) {
+      const tokens = countOf(value) ?? 0
+      return tokens < 1000 ? String(tokens) : (tokens / 1000).toFixed(1) + 'k'
+    }
+
+    /** Collapse and clip one disclosure line without splitting a word. */
+    function clipText(text, maxChars) {
+      const collapsed = String(text ?? '').replace(/\s+/g, ' ').trim()
+      if (collapsed.length <= maxChars) return collapsed
+      const head = collapsed.slice(0, Math.max(0, maxChars - 1))
+      const boundary = head.lastIndexOf(' ')
+      return `${boundary > maxChars * 0.6 ? head.slice(0, boundary) : head}…`
+    }
+
+    /**
+     * Whether one row is a no-op or unsafe target for a batch action.
+     *
+     * The same rules as a single row: a spawn-hazard row is never touched (the
+     * 1.4 valve), Stop skips rows already stopped/stopping and rows configured
+     * off, and Restart skips only a row that is already stopped and off. Every
+     * skipped row is counted in the final summary instead of being posted.
+     */
+    function batchEligible(server, action) {
+      if (spawnHazard(server)) return false
+      const status = String(server.status || 'unknown')
+      if (action === 'stop') {
+        if (server.enabled !== true) return false
+        return status !== 'stopped' && status !== 'stopping'
+      }
+      return !(server.enabled !== true && status === 'stopped')
+    }
+
     /**
      * Live wording for a row the Host maps to `starting` (connecting,
      * reconnecting, waiting-credentials), or `null` when the plain translated
@@ -407,6 +479,8 @@ window.__ModuleLoader__.load({
         const [loadError, setLoadError] = useState(null)
         const [outcome, setOutcome] = useState(null)
         const [pending, setPending] = useState(() => new Map())
+        // Status filter for the card list; `all` shows every row.
+        const [filter, setFilter] = useState('all')
         const alive = useRef(true)
         // Every request gets a monotonic generation. Snapshots only move forward,
         // and a GET that started before the newest action (or before the newest
@@ -446,6 +520,21 @@ window.__ModuleLoader__.load({
           }
         }, [load])
 
+        /** One action request, shared by a single row and a batch row. */
+        const sendAction = useCallback(async (server, action) => {
+          return action === 'restart'
+            ? requestJson(RESTART_URL, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(addressBody(server)),
+              }, { track: controllers.current })
+            : requestJson(TOGGLE_URL, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(Object.assign(addressBody(server), { enabled: action === 'start' })),
+              }, { track: controllers.current })
+        }, [])
+
         const act = useCallback(async (server, action) => {
           const key = addressOf(server)
           const seq = (sequence.current += 1)
@@ -458,17 +547,7 @@ window.__ModuleLoader__.load({
             return next
           })
           try {
-            const body = action === 'restart'
-              ? await requestJson(RESTART_URL, {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify(addressBody(server)),
-                }, { track: controllers.current })
-              : await requestJson(TOGGLE_URL, {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify(Object.assign(addressBody(server), { enabled: action === 'start' })),
-                }, { track: controllers.current })
+            const body = await sendAction(server, action)
             if (!alive.current) return
             if (seq > appliedSequence.current) {
               appliedSequence.current = seq
@@ -491,13 +570,117 @@ window.__ModuleLoader__.load({
               })
             }
           }
-        }, [])
+        }, [sendAction])
+
+        /**
+         * Run one batch action over the filtered rows, serially.
+         *
+         * Every eligible row is marked pending before the first request, each
+         * request reuses the single-row body/URL, and the final line reports
+         * applied / failed / skipped counts. Requests never overlap, so a slow
+         * row delays the rest instead of racing them.
+         */
+        const runBatch = useCallback(async (action, targets) => {
+          if (!Array.isArray(targets) || targets.length === 0) return
+          const eligible = targets.filter((server) => batchEligible(server, action))
+          const skipped = targets.length - eligible.length
+          setOutcome(null)
+          if (eligible.length > 0) {
+            setPending((previous) => {
+              const next = new Map(previous)
+              for (const server of eligible) next.set(addressOf(server), action)
+              return next
+            })
+          }
+          let applied = 0
+          let failed = 0
+          for (const server of eligible) {
+            const key = addressOf(server)
+            const seq = (sequence.current += 1)
+            actionSequence.current = seq
+            try {
+              const body = await sendAction(server, action)
+              if (!alive.current) return
+              if (seq > appliedSequence.current) {
+                appliedSequence.current = seq
+                if (body !== null && Array.isArray(body.servers)) setState(body)
+                setLoadError(null)
+              }
+              applied += 1
+            } catch {
+              if (!alive.current) return
+              failed += 1
+            } finally {
+              if (alive.current) {
+                setPending((previous) => {
+                  if (!previous.has(key)) return previous
+                  const next = new Map(previous)
+                  next.delete(key)
+                  return next
+                })
+              }
+            }
+          }
+          if (!alive.current) return
+          setOutcome({
+            tone: failed > 0 ? 'error' : 'info',
+            text: fillTemplate(tRef.current('batch.done'), { applied, failed, skipped }),
+          })
+        }, [sendAction])
 
         const servers = state !== null && Array.isArray(state.servers) ? state.servers : []
         // `now` is the Host's clock, so a retry countdown computed from
         // `live.nextRetryAtMs` stays meaningful even when the panel's own clock
         // drifts. It is absent from older Hosts; the countdown is then skipped.
         const now = state !== null && typeof state.now === 'number' && Number.isFinite(state.now) ? state.now : null
+
+        // The Host's optional v1.5 snapshots. The panel's disclosure is computed
+        // without an agent, so `loadedTools` is the cold default; the live loaded
+        // view is the truthful "this window" count when it has any agent.
+        const disclosure = state !== null && state.disclosure !== null && typeof state.disclosure === 'object' ? state.disclosure : null
+        const loadedView = state !== null && state.loaded !== null && typeof state.loaded === 'object' ? state.loaded : null
+        const loadedAgents = loadedView !== null && Array.isArray(loadedView.agents)
+          ? loadedView.agents.filter((agent) => agent !== null && typeof agent === 'object')
+          : []
+        const hiddenTools = countOf(disclosure?.hiddenTools) ?? 0
+        const hiddenTokens = countOf(disclosure?.hiddenTokens) ?? 0
+        // "Loaded in this window" is a unique-tool count: the same tool loaded
+        // by two live agents is still one tool.
+        const loadedNames = new Set()
+        for (const agent of loadedAgents) {
+          if (!Array.isArray(agent.loaded)) continue
+          for (const name of agent.loaded) if (typeof name === 'string' && name !== '') loadedNames.add(name)
+        }
+        const loadedTotal = loadedAgents.length > 0 ? loadedNames.size : countOf(disclosure?.loadedTools) ?? 0
+        const showDisclosure = hiddenTools > 0 || loadedAgents.length > 0
+        const keptLines = []
+        if (disclosure !== null && Array.isArray(disclosure.notAdopted)) {
+          const counts = new Map()
+          for (const item of disclosure.notAdopted) {
+            if (item === null || typeof item !== 'object') continue
+            const reason = clipText(item.reason, 80)
+            if (reason === '') continue
+            counts.set(reason, (counts.get(reason) ?? 0) + 1)
+          }
+          for (const [reason, count] of counts) {
+            if (keptLines.length >= 3) break
+            keptLines.push(fillTemplate(t('disclosure.kept'), { reason, count }))
+          }
+        }
+
+        const statuses = []
+        for (const server of servers) {
+          const status = String(server.status || 'unknown')
+          if (!statuses.includes(status)) statuses.push(status)
+        }
+        // Keep the chosen filter even when a poll removes that status: the
+        // select keeps the option and the list explains that nothing matches.
+        const activeFilter = filter
+        const filterStatuses = filter !== 'all' && !statuses.includes(filter) ? [...statuses, filter] : statuses
+        const filteredServers = activeFilter === 'all'
+          ? servers
+          : servers.filter((server) => String(server.status || 'unknown') === activeFilter)
+        const batchBusy = pending.size > 0
 
         const card = (server) => {
           const key = addressOf(server)
@@ -512,7 +695,14 @@ window.__ModuleLoader__.load({
           const liveLabel = busy ? null : liveLabelOf(server, live, t)
           const label = liveLabel === null ? (busy ? t(BUSY_STATE[pendingAction]) : t('status.' + stateKey)) : liveLabel
           const tone = statusTone(stateKey)
-          const meta = [server.transport, server.target, server.toolCount + ' ' + t('toolsUnit')]
+          const cardHiddenTools = countOf(server.hiddenTools) ?? 0
+          const hiddenPart = cardHiddenTools > 0
+            ? fillTemplate(t('card.hidden'), { hidden: cardHiddenTools, tokens: tokenText(server.hiddenTokens) })
+            : null
+          // A lazy row is marked in the existing meta line, so the card layout
+          // does not grow an extra element for it.
+          const lazyPart = server.lazy === true ? t('lazy') : null
+          const meta = [server.transport, server.target, server.toolCount + ' ' + t('toolsUnit'), lazyPart, hiddenPart]
             .filter((part) => typeof part === 'string' && part !== '')
             .join(' · ')
           // The management half reports why a server failed to start; surface it
@@ -581,6 +771,58 @@ window.__ModuleLoader__.load({
               h('span', { className: 'dsh-mcp-skeleton dsh-mcp-skeleton-line' }),
               h('span', { className: 'dsh-mcp-skeleton dsh-mcp-skeleton-line' }))))
 
+        // A compact summary of what this window is hiding. It only appears when
+        // the Host actually sent a non-empty snapshot; an older Host keeps the
+        // exact 1.4 panel.
+        const disclosureBlock = showDisclosure
+          ? h('div', { className: 'dsh-mcp-disclosure' },
+              h('p', { className: 'dsh-mcp-disclosure-summary' },
+                fillTemplate(t('disclosure.summary'), {
+                  loaded: loadedTotal,
+                  hidden: hiddenTools,
+                  tokens: tokenText(hiddenTokens),
+                })),
+              loadedAgents.length === 0 ? null : h('details', { className: 'dsh-mcp-disclosure-loaded' },
+                h('summary', {}, fillTemplate(t('disclosure.loadedAgents'), { count: loadedTotal })),
+                loadedAgents.map((agent, index) => {
+                  const names = Array.isArray(agent.loaded)
+                    ? agent.loaded.filter((name) => typeof name === 'string' && name !== '')
+                    : []
+                  const shown = names.slice(0, LOADED_NAME_LIMIT)
+                  const more = names.length > shown.length ? ' +' + (names.length - shown.length) + ' more' : ''
+                  return h('p', { className: 'dsh-mcp-disclosure-agent', key: 'agent-' + index },
+                    String(agent.title || agent.id || 'agent') + ': ' + shown.join(', ') + more)
+                })),
+              keptLines.map((line, index) => h('p', { className: 'dsh-mcp-disclosure-kept', key: 'kept-' + index }, line)))
+          : null
+
+        // One filter over the rendered rows; the batch buttons act only on the
+        // rows this filter currently shows.
+        const toolbar = state !== null && servers.length > 0
+          ? h('div', { className: 'dsh-mcp-toolbar' },
+              h('select', {
+                className: 'dsh-mcp-filter',
+                'aria-label': t('filter.label'),
+                value: activeFilter,
+                onChange: (event) => setFilter(event !== null && event !== undefined && event.target ? event.target.value : 'all'),
+              }, [
+                h('option', { key: 'all', value: 'all' }, t('filter.all')),
+                ...filterStatuses.map((status) => h('option', { key: status, value: status }, t('status.' + status))),
+              ]),
+              h('button', {
+                type: 'button',
+                className: 'dsh-mcp-btn dsh-mcp-batch-stop',
+                disabled: batchBusy || filteredServers.length === 0,
+                onClick: () => runBatch('stop', filteredServers),
+              }, t('batch.stop')),
+              h('button', {
+                type: 'button',
+                className: 'dsh-mcp-btn dsh-mcp-batch-restart',
+                disabled: batchBusy || filteredServers.length === 0,
+                onClick: () => runBatch('restart', filteredServers),
+              }, t('batch.restart')))
+          : null
+
         let list
         if (loadError !== null) {
           list = h('div', { className: 'dsh-mcp-failure', role: 'alert' },
@@ -590,8 +832,10 @@ window.__ModuleLoader__.load({
           list = h('ul', { className: 'dsh-mcp-cards', 'aria-busy': 'true', 'aria-label': t('loading') }, [0, 1].map(skeleton))
         } else if (servers.length === 0) {
           list = h('p', { className: 'dsh-mcp-empty' }, t('empty'))
+        } else if (filteredServers.length === 0 && activeFilter !== 'all') {
+          list = h('p', { className: 'dsh-mcp-empty' }, t('filter.empty'))
         } else {
-          list = h('ul', { className: 'dsh-mcp-cards' }, servers.map(card))
+          list = h('ul', { className: 'dsh-mcp-cards' }, filteredServers.map(card))
         }
 
         return h('section', { className: 'dsh-mcp' },
@@ -601,6 +845,8 @@ window.__ModuleLoader__.load({
                 t('title'),
                 state !== null ? h('span', { className: 'dsh-mcp-group-info' }, servers.length + ' ' + t('countUnit')) : null)),
             h('p', { className: 'dsh-mcp-intro' }, t('description')),
+            disclosureBlock,
+            toolbar,
             list,
             // Always mounted, so the live region exists before the message it
             // announces; a following poll leaves it untouched.

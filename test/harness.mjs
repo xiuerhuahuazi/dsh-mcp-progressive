@@ -29,6 +29,8 @@ import path from 'node:path'
 import vm from 'node:vm'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { registerServerManagement } from '../lib/management.js'
+
 /** Repository root (the directory that holds index.js). */
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -551,8 +553,11 @@ function defaultRows() {
 }
 
 /**
- * Build the management environment: a fake plugin context that activates the
- * management half of the plugin.
+ * Build the temp fixtures and fake context for a management environment.
+ *
+ * The caller activates the management half afterwards: `createManagementEnv`
+ * goes through `index.js`, `createManagementEnvWithOptions` registers it
+ * directly with explicit Host options.
  *
  * @param {object} [options]
  * @param {object[]} [options.rows] fake `pluginManager.listPlugins()` rows
@@ -564,7 +569,7 @@ function defaultRows() {
  * @param {string} [options.patchPath] profile patch file
  * @returns {Promise<object>} the management environment
  */
-export async function createManagementEnv(options = {}) {
+async function buildManagementEnv(options = {}) {
   const { dir: temp, remove } = await makeTempDir('dsh-mcp-harness-mgmt-')
   const home = options.home ?? path.join(temp, 'home')
   const profileDir = path.join(temp, 'profile')
@@ -624,10 +629,6 @@ export async function createManagementEnv(options = {}) {
     },
   })
 
-  const { apply } = await import(PLUGIN_ENTRY)
-  apply(fake.ctx, options.config ?? { manageServers: true })
-  await flushMicrotasks()
-
   return {
     ...fake,
     rows,
@@ -642,6 +643,40 @@ export async function createManagementEnv(options = {}) {
       await remove()
     },
   }
+}
+
+/**
+ * Build the management environment and activate it through `index.js`.
+ *
+ * @param {object} [options] see `buildManagementEnv`
+ * @returns {Promise<object>} the management environment
+ */
+export async function createManagementEnv(options = {}) {
+  const env = await buildManagementEnv(options)
+  const { apply } = await import(PLUGIN_ENTRY)
+  apply(env.ctx, options.config ?? { manageServers: true })
+  await flushMicrotasks()
+  return env
+}
+
+/**
+ * Build the management environment and register the management half directly
+ * with explicit options.
+ *
+ * `index.js` owns the real wiring of the Host `footprint` / `loadedView`
+ * callbacks; a test that needs a hand-built snapshot (or a throwing callback)
+ * registers `registerServerManagement` itself, bypassing that wiring and
+ * keeping the fixture independent of the Host lane.
+ *
+ * @param {object} [managementOptions] second argument of `registerServerManagement`
+ * @param {object} [options] see `buildManagementEnv`
+ * @returns {Promise<object>} the management environment
+ */
+export async function createManagementEnvWithOptions(managementOptions = {}, options = {}) {
+  const env = await buildManagementEnv(options)
+  registerServerManagement(env.ctx, managementOptions)
+  await flushMicrotasks()
+  return env
 }
 
 /**

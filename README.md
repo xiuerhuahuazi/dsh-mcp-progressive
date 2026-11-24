@@ -2,9 +2,7 @@
 
 English | [中文](#中文)
 
-Progressive disclosure for MCP tools in DeepSeek Harness — the model stops paying for every
-`mcp__*` tool schema on every request — plus an **MCP servers** tab and two model tools to
-start, stop and restart MCP servers without leaving the Harness.
+Progressive disclosure for MCP tools in DeepSeek Harness: expose only the tool schemas a conversation needs, and use the **MCP servers** tab or model tools to start, stop and restart servers.
 
 ## English
 
@@ -28,7 +26,7 @@ agent's registry view:
 2. Loading re-registers the selected definitions inside the agent's own scope, which a
    restriction leaves visible. The deny list is therefore never rebuilt for a load: it changes
    only when the catalog changes (a server connects or disconnects), while a load or unload is
-   what rewrites the request's tool array (see [Cost](#cost-what-a-load-actually-costs)).
+   what rewrites the request's tool array (see [Measured usage](#measured-usage-direct-call-load-and-keep-or-toggle)).
 3. With `manageServers` enabled (the default) five small meta-tools replace the catalog:
 
    | Tool | Purpose |
@@ -128,6 +126,19 @@ disconnected entirely (its child process exits) without unloading this plugin:
   `mcp_server { server, action: "start" | "stop" | "restart" }` changes one. Only this write tool
   asks for approval (the panel is a human click, so its routes are not gated). On a host without
   an approval service the platform denies the ask instead of running it.
+- **Hidden footprint (1.5)** — every server row that hides catalog tools now reports how many and
+  the estimated size of those definitions (`mcp_servers` prints
+  `N hidden ≈ X tokens` on those rows plus a `Hidden by default: …` line; the panel card shows the
+  same numbers for the same rows). The panel also adds a **loaded in this window** section, a
+  **status filter**, and **Stop shown / Restart shown** batch actions over the rows the filter
+  leaves visible.
+- **Connection-layer lazy loading (1.6.0)** — `lazyConnect` names servers whose rows are
+  configured `disabled: true`: their tool metadata comes from a local cache, so `mcp_search` still
+  sees them; the first `mcp_load`/`mcp_call` starts the row and waits for the tool, and
+  `warmIdleMs` stops it again after idle. Auto-prime can stop a running row after observing and caching it; the warm
+  timer is suppressed while a loaded tool exists or a call is in flight (a release already
+  requested is not cancelled), and a cache-only tool cannot be started without the desktop
+  management half.
 
 How a change is applied:
 
@@ -231,27 +242,13 @@ Requires DeepSeek Harness `>=0.2.2-rc.1 <0.3.0-0` (0.2.2 moved tool declarations
 declares one runtime dependency, `yaml` (`^2.9.1`), used for the patch rewrite; the bundle
 installation installs it.
 
-**1.4.0 lives on GitHub, not on npm yet.** The npm registry still serves only
-`dsh-mcp-progressive@1.2.0`, which predates 1.2.1, 1.3.0 and 1.4.0, so installing
-`dsh-mcp-progressive@1.4.0` from npm fails until that release is published there. Install from
-the `v1.4.0` GitHub tag:
+**v1.6.0 is a GitHub-only release; npm remains at 1.2.0.** In **Settings → Plugins → install bundle**, enter the GitHub spec below, or use the model tool:
 
 ```
-plugin_manager → action: "install_bundle", target: "github:xiuerhuahuazi/dsh-mcp-progressive#v1.4.0"
+plugin_manager → action: "install_bundle", target: "github:xiuerhuahuazi/dsh-mcp-progressive#v1.6.0"
 ```
 
-or **Settings → Plugins → install bundle** with the same spec. The tag points at the release
-commit recorded in the v1.4.0 release notes; when you need an immutable target, pin that sha
-instead of the tag (the DSH docs recommend a pinned digest over a moving branch). The bundle
-inserts the row `mcp-progressive`; no other bundle is required.
-
-Upgrading from the npm `dsh-mcp-progressive@1.2.0` (or 1.0.0), or from a 1.2.1 / 1.3.0 git
-install: remove the old installed package/bundle first, then install the git spec above; restart
-the Harness app once so the client half and package metadata are picked up, then refresh the
-page. A fresh install shows the **MCP servers** tab on first start.
-
-Once 1.4.0 is published to npm, plain `dsh-mcp-progressive@1.4.0` will work too; this section
-will say so at that point.
+To upgrade, remove the old bundle before installing the tag. Restart Harness and refresh the page, then check for the **MCP servers** tab.
 
 ### Configuration
 
@@ -266,6 +263,12 @@ The inserted row takes an optional config:
     eagerTools: []           # names loaded for the root agent from the start
     searchLimit: 12          # default result page size (1-40)
     summaryChars: 160        # one-line description budget per result (24-600)
+    catalogServers: 4        # servers named in the one-line prompt catalog (1-8, default 4)
+    lazyConnect: ['*']       # '*' = every dsh-mcp-client row; or explicit server names
+    autoPrimeMs: 15000       # observe a running lazy row this long, cache, then stop it once (0 = off)
+    warmIdleMs: 600000       # stop a lazy server after this idle time (0 = keep warm)
+    lazyStartTimeoutMs: 30000 # deadline for connect + tool registration (5s-120s)
+    cachePath: ''            # default <profile>/mcp-progressive/tool-cache.json
     enableLoad: true         # register mcp_load
     enableCall: true         # register mcp_call
     correctiveUnknownTool: true
@@ -273,72 +276,53 @@ The inserted row takes an optional config:
 ```
 
 The bundle's own patch passes `{}`; override the row from the profile patch to change these
-values.
+values. `catalogServers` (1–8, default 4) caps how many servers the one-line prompt catalog
+names; the rest are summarized as “+N more”.
 
-### Cost: what a load actually costs
+`lazyConnect: ['*']` auto-adopts **every `dsh-mcp-client` row**, including rows added later.
+Rows that are running when the plugin starts (or when a new row appears) are observed for
+`autoPrimeMs` (default 15 s), cached, and stopped **once** — no manual Stop per server. The scanner
+also prunes cache buckets for rows that no longer exist, so an uninstall does not leave a stale
+`[lazy]` tool behind. On-demand starts use the 10-minute `warmIdleMs`; loaded tools and in-flight
+calls suppress that timer (an already-requested release is not cancelled).
 
-The tool array sits at the head of the prompt, and a cache prefix runs from that point to the
-end of the conversation. Paying for the tools once while they are unchanged (cache-hit price) is
-cheap; **changing the array re-bills the whole prefix as a miss**. So the price of one load is
-not a constant — it grows with the conversation:
+The cache is `<profile>/mcp-progressive/tool-cache.json` with only `name` / `description` /
+`parameters` (no env, headers or secrets). A row added already `disabled: true` has no tools to
+observe, so it has no cache until its first on-demand start — that is the one boundary of
+auto-priming. A **custom MCP plugin** that is not a `dsh-mcp-client` row (for example
+`openmotion`) is outside the management half: the plugin hides its tools and caches them, but
+cannot stop its process. The panel marks managed lazy rows. In one [process check](docs/v1.6-p1-cost.md), the tool-definition character count stayed unchanged, the lazy start plus call took 4.4 s, and the child process exited after the configured idle period.
 
-```
-cost of one load ≈ (prompt length at the moment of the load) × (P_miss − P_hit)
-```
+### Measured usage: direct call, load and keep, or toggle
 
-`P_miss`/`P_hit` are the provider's per-token cache-miss and cache-hit prices. Removing tools
-pays the same miss again, which is why unloading is not a way to save money and why loading is
-best kept monotonic.
+On Astra, each strategy used the same read-only tool twice. Counts are **totals across all model requests** needed to complete the task, not per-call overhead.
 
-Measured endpoints on one profile snapshot (DeepSeek V4.1 Flash; two MCP servers, 87 + 207
-tools; tool arrays read back from recorded `request/header` entries):
+| Strategy | Model requests | Uncached input tokens | Cached input tokens | Output tokens |
+|---|---:|---:|---:|---:|
+| `mcp_call` twice | 4 | 75,021 | 146,944 | 608 |
+| `mcp_load` once, keep native | 5 | 131,419 | 148,224 | 724 |
+| Unload and reload between uses | 7 | 140,016 | 252,288 | 1,067 |
 
-| | tools in request | of which MCP | tool-definition JSON | tokens |
-|---|---|---|---|---|
-| before | 351 | 294 | 864,556 chars | 268,154 |
-| after | ≈60 (incl. meta-tools) | 0 | ≈49–51k chars | ≈15.1–15.8k |
+Direct calls used the fewest requests and uncached input tokens in this comparison. There was one run per strategy, starting contexts differed, and the actual charge is unknown. Loading changes the visible tool array; that alone does not establish a full-prefix cache miss or a break-even number of calls.
 
-That is ≈94.1–94.4 % less tool-definition payload, or ≈252,000–253,000 fewer prompt tokens per
-request. The "after" endpoint is a range on purpose: the same review records **48,671 chars** in
-its synthesis and **50,832 chars (61 tools)** in its probe run, i.e. the two captures are not the
-same snapshot. Treat all of this as **one uncontrolled profile capture, not a benchmark** (the
-before/after rows may include server changes, and no derivation script or `request/header`
-snapshot is committed). The token figures are derived from the recorded usage with the measured
-ratio of **3.224 chars/token** for this block (a flat 4 chars/token would understate it by about
-24 %).
-
-Money is the same formula with prices. One profile measured a single late `mcp_load` at
-≈0.45 元 (a near-full cache miss; the cached saving for the removed block in the same snapshot
-was ≈0.010 元 per request). Treat that as one example, not a budget: the ≈45-request payback
-quoted with it assumed a much larger cache discount than 10×; at a 10× discount the same miss is
-paid back after roughly 10 cached requests, and a longer conversation makes every load more
-expensive. Re-measure on your own profile before making a decision that depends on the amount.
-
-What follows from the formula:
-
-- **one-off calls** → `mcp_call`: it shadows its target only for the nested dispatch and removes
-  it afterwards, so the next prompt's tool array is unchanged and no cache prefix is invalidated;
-- **repeated calls** → `mcp_load`, batching several names in one call so one miss covers all of
-  them;
-- **keep loading monotonic** — unload only when the context actually matters, and pay the miss;
-- **`eagerTools`** is for tools a session always needs, and applies to the root agent only (a
-  subagent would pay the same miss in a short, throw-away context);
-- **load tools, not a server**: in the measured snapshot the 294 MCP tools accounted for
-  253,058 tokens (≈860 each), so loading a 170-tool server wholesale would cost six figures of
-  tokens.
+For a short task, start with `mcp_call`. Use `mcp_load` when you want a native tool, and keep it available while working rather than toggling between uses. Unload when removing the native entry or reducing the visible tool array matters. The earlier [schema-size comparison](docs/v1.5-ab-measurement.md) and [lazy connection process check](docs/v1.6-p1-cost.md) measure different things; neither measures billing.
 
 ### Tests / verification
 
 Everything runs locally with no network and no access to `~/.dsh`:
 
-- `npm test` — the suite in `test/` (`node --test`), **200** tests. With the unpacked DSH
-  runtime present (`$DSH_RUNTIME`, default `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`) it
-  is 197 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
-  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 200 pass
+- The one exception is `scripts/measure-tools-payload.mjs`: it is not part of `npm test` and it
+  reads session captures you pass it — it parses the `request/header` tool arrays in those files
+  and prints tool names, counts and sizes, never message or prompt text.
+
+- `npm test` — the suite in `test/` (`node --test`), **302** tests. With the unpacked DSH
+  runtime present (`$DSH_RUNTIME`) it
+  is 299 pass / 3 skip / 0 fail: the three real-catalog schema cases only run when
+  `MCP_REVIEW_CATALOG` points at a local copy of the review's 210-tool catalog (then 302 pass
   / 0 skip; the catalog is private and not committed). Without the unpacked runtime
   (`DSH_RUNTIME=/nonexistent`, what CI has — `.github/workflows/test.yml`, Node 22 and 24,
-  neither runtime nor catalog) the 18 runtime-dependent and the 3 real-catalog cases skip:
-  179 pass / 21 skip / 0 fail.
+  neither runtime nor catalog) the 39 runtime-dependent and the 3 real-catalog cases skip:
+  260 pass / 42 skip / 0 fail.
 - `node scripts/repro-review.mjs` — the review-defect **regression gate** (default
   `--expect fixed`). It replays the six defect families from the 2026-11-19 review and exits 0
   only when none of them reproduces; otherwise it prints `REGRESSION: <families>` and exits 1.
@@ -352,23 +336,28 @@ Everything runs locally with no network and no access to `~/.dsh`:
   evidence)` on both the reproduced and the PASS line) and `--json` carries `skipsNotEvidence`
   / `authority`, so a skipped run is not the six-family gate.
 - `node scripts/live-boot.mjs` — the real-platform **behavioural gate** (default `--expect fixed`,
-  **11/11 probes**). It boots a throw-away real DSH web instance (`DSH_HOME` in a temp directory,
+  **13/13 probes**). It boots a throw-away real DSH web instance (`DSH_HOME` in a temp directory,
   OS-assigned port) with the package installed, mints the browser session cookie and drives the
   routes with `node:http`, so an explicit `Host` header really reaches the server. It accepts
   `401|403` for the unauthenticated probe and asserts `403` for a bad `Host`, `415` for
   `text/plain` and for a missing content type, `405` + `Allow` for the wrong method, `400` for a
   bad body and `200` authenticated — and that both patch layers are byte-identical afterwards.
-  The throw-away profile also declares two real MCP loader rows — `mcp-probe-broken` (a command
-  that cannot spawn) and `mcp-probe-ok` (a minimal stdio MCP server written into the temp home,
-  exposing two tools) — and the gate adds `state-live-broken`, which requires `status: "error"`,
+  The throw-away profile also declares three real MCP loader rows — `mcp-probe-broken` (a command
+  that cannot spawn), `mcp-probe-ok` (a minimal stdio MCP server written into the temp home,
+  exposing two tools) and `mcp-probe-lazy` (a `disabled: true` row with a pre-seeded tool cache) —
+  and the gate adds `state-live-broken`, which requires `status: "error"`,
   `live.state: "failed"` and a `statusDetail` carrying the spawn error even though the row's
   `fiberPhase` is `active` (inference alone would have called it `idle`), and
   `state-live-connected`, which requires `status: "running"`, `live.state: "connected"`,
-  `live.toolCount: 2` and `statusDetail: null`; both rows settle in ≈70 ms (`live rows settled:
-  yes`). Result on this tree: `PASS (11/11)`. `--expect baseline` documents the 1.2.0 matrix and
-  only matches a `v1.2.0` checkout; it reports the two live probes as `skip`. A skip is printed
-  and counted separately: a run that needed one exits 0 where CI/fallback require it, but its
-  verdict is not the authoritative gate — the fallback prints `PASS (9/11, 2 skipped —
+  `live.toolCount: 2` and `statusDetail: null`. Both rows settle in ≈70 ms (`live rows settled:
+  yes`); `state-disclosure` requires the v1.5 footprint (`disclosure.hiddenTools >= 2`,
+  positive token estimate) plus per-row `hiddenTools`/`hiddenTokens` on the connected probe row;
+  `state-lazy-row` requires the lazy row to read `status: "stopped"`, `enabled: false`,
+  `lazy: true`, `hiddenTools >= 1` and `toolCount: 0`, proving the config wiring and cache read.
+  Result on this tree: `PASS (13/13)`. `--expect baseline` documents the 1.2.0 matrix and
+  only matches a `v1.2.0` checkout; it reports the four live/disclosure/lazy probes as `skip`. A skip is
+  printed and counted separately: a run that needed one exits 0 where CI/fallback require it, but its
+  verdict is not the authoritative gate — the fallback prints `PASS (9/13, 4 skipped —
   fallback/no runtime: skips are not evidence)` and `--json` carries `skipsNotEvidence` /
   `authority`. Without the unpacked runtime the gate falls back to an in-process HTTP server
   behind a stub fence (`mode: fallback-http`, `platformAuthority: false`) and the live probes are
@@ -413,8 +402,15 @@ mapping is in [docs/fix-map.md](docs/fix-map.md).
   `ctx.tools.definitions(agent)` without a step tool-set can observe the target definition.
 - Patch writes are compare-and-swap with stale detection and retries, not a cross-process file
   lock: a concurrent `plugin_manager` (pnpm) write is detected and retried, but not coordinated.
-- `mcp_servers` does not report how many catalog tools are hidden or leaked (deferred: that needs
-  disclosure state private to the Host half); a failed mask is reported by one warning in the log.
+- `mcp_servers` reports the **hidden footprint** per server since 1.5 (how many catalog tools it
+  contributes and what those definitions would cost if visible) and names the tools the plugin
+  deliberately keeps visible, with the reason; a failed mask is still reported by one warning in
+  the log, and the number of tools that leaked into a given prompt is not published.
+- `@deepseek-ai/dsh-mcp-client` 0.2.2 does not put `execution.taskSupport` on the registered tool
+  definition, so a `taskSupport: required` tool cannot be recognized *before* it is called. It is
+  treated like any other catalog tool; the bridge's own `requires task-based execution` error is
+  the only signal. The fail-open `taskRequired` branch only helps a bridge that exposes that field
+  on the definition.
 - An upstream SDK behaviour can signal the caller's process group: `@modelcontextprotocol/client`'s
   `StdioClientTransport._dispose()` may call `proc.kill("SIGTERM")` on a transport whose spawn has
   not completed, and a `ChildProcess` with no pid forwards that to pid 0. It is pre-existing
@@ -449,8 +445,7 @@ mapping is in [docs/fix-map.md](docs/fix-map.md).
 - The `/dsh-mcp-hub/*` fence comes from the Host `connection` service, and the management half is
   only active while that service exists; a recomposition window in which the routes are still
   mounted but the service is momentarily gone answers `503` (fail closed) and changes nothing.
-- Loaded tools stay in the tool array for the rest of the session; unloading changes the array
-  again and pays another cache miss.
+- Loaded tools remain native until unloaded. Unloading changes the tool array in subsequent requests.
 - Disclosure bookkeeping is fail-open: if a scope or a registration is unavailable it logs one
   warning per `(kind, Agent)` and leaves the tool visible instead of failing a model request; the
   prompt-assembly safety net retries a mask that was never installed.
@@ -469,8 +464,7 @@ MIT.
 
 ## 中文
 
-MCP 工具的渐进披露：模型不必在每次请求里为每个 `mcp__*` 工具 schema 付费；另带一个
-**MCP 服务器**标签页和两个模型工具，可以在 Harness 里直接启动、停止、重启 MCP 服务器。
+MCP 工具的渐进披露：每次模型请求只带上可见工具的定义；另带一个 **MCP 服务器**标签页和两个模型工具，可在 Harness 内启动、停止、重启 MCP 服务器。
 
 ### 为什么
 
@@ -490,7 +484,7 @@ MCP 工具的渐进披露：模型不必在每次请求里为每个 `mcp__*` 工
    MCP 工具不在其中（见「限制」）。
 2. 装载会把选中的定义重新注册到该 agent 自己的作用域，作用域内注册不受 restriction 影响。
    因此装载**不会重建** deny 列表：deny 只在目录变化（某个服务器连上或断开）时改变，而真正
-   改写请求工具数组的是装载/卸载（见[费用](#费用一次装载到底花多少)）。
+   改写请求工具数组的是装载/卸载（见[策略实测](#实测直调保留装载与反复切换)）。
 3. 开启 `manageServers`（默认开启）时，用五个小元工具替代目录：
 
    | 工具 | 作用 |
@@ -568,6 +562,14 @@ id 的 agent 不会共享同一份遮蔽。Harness 重启即重置。`eagerTools
 - **模型工具**：`mcp_servers` 列出所有已配置服务器及状态，并附同一行实时详情；
   `mcp_server { server, action: "start" | "stop" | "restart" }` 控制其中一个。只有这个写工具需要
   审批（面板是人点按钮，人就是同意，故其路由不设审批门）；宿主没有审批服务时平台会拒绝而不是执行。
+- **隐藏足迹（1.5）**：每一行服务器现在还会报出它藏了哪些目录工具，以及这些定义如果可见要花多少
+  （`mcp_servers` 每行给 `N hidden ≈ X tokens`，末尾另有一行 `Hidden by default: …`；面板卡片
+  显示同样的数字）。面板另加了**本窗口已加载**区、**按状态筛选**，以及针对筛选后可见行的
+  **停止当前列表 / 重启当前列表**批量操作。
+- **连接层懒加载（1.6.0）**：`lazyConnect` 里的 server 行保持 `disabled: true`，工具元数据
+  从本地缓存读，所以 `mcp_search` 仍能看到；第一次 `mcp_load`/`mcp_call` 才启动该行并等工具注册，
+  `warmIdleMs` 空闲后停掉。插件会在观察并缓存运行中的行之后自动停一次；有已加载工具或调用在飞时会抑制
+  保温计时器（已经发出的 release 不会被取消）；没有桌面管理半时，缓存工具无法启动。
 
 生效方式：
 
@@ -654,83 +656,59 @@ Host、group/builtin 行、缺少 fiber 句柄或读取抛错时一律得到 `nu
 `system-prompt/assemble` 瀑布，这正是旧版本无法运行本版本的原因）。插件声明唯一的运行时依赖
 `yaml`（`^2.9.1`），用于补丁改写；安装 bundle 时会一并安装。
 
-**1.4.0 目前只在 GitHub 上，还没发布到 npm。** npm registry 上仍然只有
-`dsh-mcp-progressive@1.2.0`（早于 1.2.1、1.3.0 与 1.4.0），所以 npm spec
-`dsh-mcp-progressive@1.4.0` 会失败，直到该版本正式发布到 npm。请从 `v1.4.0` 的 GitHub tag 安装：
+**v1.6.0 仅在 GitHub 发布；npm 版仍为 1.2.0。** 在**设置 → 插件 → 安装 bundle** 输入以下 spec，或使用模型工具：
 
 ```
-plugin_manager → action: "install_bundle", target: "github:xiuerhuahuazi/dsh-mcp-progressive#v1.4.0"
+plugin_manager → action: "install_bundle", target: "github:xiuerhuahuazi/dsh-mcp-progressive#v1.6.0"
 ```
 
-或在**设置 → 插件 → 安装 bundle** 中填入同一个 spec。该 tag 指向 v1.4.0 release notes 里记录的
-发布 commit；需要不可变目标时，钉住那个 sha，而不是 tag（DSH 文档建议钉 sha，而不是跟随会移动的
-分支）。该 bundle 会插入 `mcp-progressive` 行，不依赖其他 bundle。
-
-从 npm 的 `dsh-mcp-progressive@1.2.0`（或 1.0.0）、或从 1.2.1 / 1.3.0 的 git 安装升级：先移除旧的
-已安装包/bundle，再安装上面的 git spec；**重启一次 Harness 应用**让客户端半侧与包元数据生效，
-然后刷新页面；全新安装首次启动即可看到「MCP 服务器」标签页。
-
-等 1.4.0 发布到 npm 之后，直接 `dsh-mcp-progressive@1.4.0` 也会可用；届时本节会更新。
+从旧版升级时先移除旧 bundle，再安装该 tag。重启 Harness 并刷新页面后，检查「MCP 服务器」标签页。
 
 ### 配置
 
 插入的行支持可选配置（示例见英文部分的 YAML）：`prefix`、`alwaysVisible`（精确名或以 `*` 结尾
 的前缀）、`eagerTools`（只对根 agent 生效）、`searchLimit`（1–40，默认 12）、`summaryChars`
-（24–600，默认 160）、`enableLoad`、`enableCall`、`correctiveUnknownTool`、`manageServers`。
+（24–600，默认 160）、`catalogServers`（1–8，默认 4，限制 prompt 里那一行目录写几个 server，
+其余写成「+N more」）、`lazyConnect`（`['*']` = 所有 `dsh-mcp-client` 行，或列具体 server 名）、
+`autoPrimeMs`（运行中的按需行观察多久后写缓存并停一次；默认 15000，0=关）、
+`warmIdleMs`（空闲停用，0=保温，默认 600000）、`lazyStartTimeoutMs`（5–120 秒，默认 30）、
+`cachePath`（默认 `<profile>/mcp-progressive/tool-cache.json`）、`enableLoad`、`enableCall`、
+`correctiveUnknownTool`、`manageServers`。
 bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.yml` 中覆盖该行即可。
 
-### 费用：一次装载到底花多少
+`lazyConnect: ['*']` 下，启动或新增时正在运行的行会被观察 `autoPrimeMs`、写缓存、自动停一次；删除
+的行会从缓存清掉，所以新增/卸载不需要人工启停。缓存只存 `name`/`description`/`parameters`，不存
+env 或密钥。新增时已经 `disabled: true` 的行没有工具可观察，第一次按需启动前没有缓存——这是唯一
+边界；自定义 MCP 插件（如 openmotion）不是 `dsh-mcp-client` 行，管理半管不到它的进程。
 
-工具数组位于 prompt 头部，缓存前缀从那里一直延伸到会话末尾。工具不变时按缓存命中价付费很便宜；
-**改变数组会把整段前缀按未命中重算**。所以一次装载的价格不是常数，而随对话变长：
+### 实测：直调、保留装载与反复切换
 
-```
-一次装载成本 ≈ （装载时刻的 prompt 长度）×（P_miss − P_hit）
-```
+在 Astra 上用同一个只读工具两次。下表是各策略完成任务所用的**全部模型请求**的 token 合计，不是单次工具调用的开销。
 
-`P_miss`/`P_hit` 是服务商每 token 的缓存未命中价与命中价。移除工具要再付一次同样的未命中，所以
-卸载不是省钱手段，装载最好保持单调。
+| 策略 | 模型请求数 | 未缓存输入 | 缓存输入 | 输出 |
+|---|---:|---:|---:|---:|
+| 两次 `mcp_call` 直调 | 4 | 75,021 | 146,944 | 608 |
+| `mcp_load` 后保留并原生调用 | 5 | 131,419 | 148,224 | 724 |
+| 卸载后再装载 | 7 | 140,016 | 252,288 | 1,067 |
 
-一个 profile 快照上的实测端点（DeepSeek V4.1 Flash；两个 MCP Server：87 + 207 个工具；工具数组
-取自记录的 `request/header`）：
+本次直调的请求和未缓存输入最少。每种策略仅测一次，启动上下文不完全相同，实际扣费未知。装卸会改变可见工具数组，但不能据此断定整段前缀缓存失效，也不能推出调用多少次就该装载。
 
-| | 请求内工具 | 其中 MCP | 工具定义 JSON | token |
-|---|---|---|---|---|
-| 之前 | 351 | 294 | 864,556 字符 | 268,154 |
-| 之后 | ≈60（含元工具） | 0 | ≈4.9–5.1 万字符 | ≈1.51–1.58 万 |
-
-即每次请求工具定义体积约 **−94.1%–−94.4%**、prompt **少约 25.2–25.3 万 token**。「之后」端点刻意写成
-区间：同一份评审在合成报告里记录 **48,671 字符**、在其探针运行里记录 **50,832 字符（61 个工具）**，
-两次抓取并非同一快照。请把这些数字当作**一次未受控的 profile 抓取，而不是基准测试**（前后两行可能
-混入服务器增减；仓库里也没有提交推导脚本或 `request/header` 快照）。token 数字按记录用量与实测比值
-**3.224 字符/token** 推算（按 4 字符/token 估算会低估约 24%）。
-
-费用就是同一公式套价格。某 profile 实测一次较晚的 `mcp_load` 约 **0.45 元**（近似全量缓存未命中；
-同一快照里被移除工具块的缓存命中节省约 **0.010 元/请求**）。这只是一个例子，不是预算：与它一起
-引用的「≈45 次回本」是按比 10× 大得多的缓存折扣算出来的；按 10× 折扣，这次未命中约 10 次缓存
-请求回本，而会话越长每次装载越贵。真要按金额决策，请在自己的 profile 上重测。
-
-由公式得出的做法：
-
-- **单次调用** → `mcp_call`：它只在嵌套分发期间临时注册目标、随后移除，下一次 prompt 的工具数组
-  不变，不会作废缓存前缀；
-- **重复调用** → `mcp_load`，一次批量传入多个名字，让一次未命中覆盖全部；
-- **保持单调装载**——只有上下文确实重要时才卸载，并为此付一次未命中；
-- **`eagerTools`** 用于会话必定要用的工具，且只对根 agent 生效（子代理会在短命的上下文里再付一次）；
-- **装载工具，而不是装载服务器**：实测快照里 294 个 MCP 工具占 253,058 token（平均 ≈860/个），
-  整个装载一个 170 工具的服务器会花六位数 token。
+短任务可先用 `mcp_call`；需要原生工具时用 `mcp_load`，在同一任务里可保留装载，避免来回切换。要缩小后续请求的工具定义或移除原生入口时再卸载。较早的[工具定义大小测量](docs/v1.5-ab-measurement.md)和[按需连接进程测量](docs/v1.6-p1-cost.md)都不是账单测量。
 
 ### 测试与验证
 
 全部本地运行，不联网、不读写 `~/.dsh`：
 
-- `npm test`——`test/` 下的测试（`node --test`），共 **200** 个。在 `$DSH_RUNTIME`（默认
-  `/tmp/dsh-asar/dsh/node_modules/@deepseek-ai`）有解包运行时的情况下是 197 通过 / 3 跳过 /
+- 唯一的例外是 `scripts/measure-tools-payload.mjs`：它不属于 `npm test`，并且会读你传给它的会话
+  抓取——它只解析那些文件里 `request/header` 的工具数组，只打印工具名、数量和体积，绝不打印
+  消息或 prompt 文本。
+
+- `npm test`——`test/` 下的测试（`node --test`），共 **302** 个。在 `$DSH_RUNTIME` 指向解包运行时的情况下是 299 通过 / 3 跳过 /
   0 失败：三个「真实目录」schema 用例只有把 `MCP_REVIEW_CATALOG` 指向评审用 210 工具目录的
-  本地副本时才运行（此时 200 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。在没有解包运行时
+  本地副本时才运行（此时 302 通过 / 0 跳过；该目录是私有数据，不随仓库提交）。在没有解包运行时
   的情况下（`DSH_RUNTIME=/nonexistent`，也就是 CI 的姿态——`.github/workflows/test.yml`，
-  Node 22 与 24，既没有运行时也没有该目录），18 个依赖运行时的用例 + 3 个真实目录用例跳过：
-  179 通过 / 21 跳过 / 0 失败。
+  Node 22 与 24，既没有运行时也没有该目录），39 个依赖运行时的用例 + 3 个真实目录用例跳过：
+  260 通过 / 42 跳过 / 0 失败。
 - `node scripts/repro-review.mjs`——评审缺陷**回归门**（默认 `--expect fixed`）。它把
   2026-11-19 评审的六组缺陷在当前代码上重放，只有一组都不复现时才 exit 0；否则打印
   `REGRESSION: <families>` 并 exit 1。凡是能观察到「修好后的结果」的组（准入、控制队列、
@@ -740,21 +718,26 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
   否则报告 `NOT A 1.2.0 CHECKOUT`。没有 DSH 运行时的情况下 YAML 那组报告为 `skip`：结论行会
   单独计数（复现行与 PASS 行都显示 `(5/6 evaluated, 1 skipped — skips are not evidence)`），
   `--json` 带 `skipsNotEvidence` / `authority`，因此带 skip 的运行不是六组回归门。
-- `node scripts/live-boot.mjs`——真实平台的**行为门**（默认 `--expect fixed`，**11/11 个探针**）。
+- `node scripts/live-boot.mjs`——真实平台的**行为门**（默认 `--expect fixed`，**13/13 个探针**）。
   它用临时 `DSH_HOME` 和操作系统分配的端口启动一个真实 DSH Web 实例并安装本包，从启动令牌换取
   浏览器 cookie，再用 `node:http` 探测路由（因此显式 `Host` 真的会到达服务器）。未认证探针接受
   `401|403`，并断言坏 `Host` → `403`、`text/plain` 与缺少 content-type → `415`、错误方法 →
   `405` 带 `Allow`、坏 body → `400`、已认证 → `200`，且事后两层补丁文件逐字节不变。临时 profile
-  还声明两条真实 MCP loader 行——`mcp-probe-broken`（一条无法 spawn 的命令）与
-  `mcp-probe-ok`（写进临时 home 的最小 stdio MCP 服务器，暴露两个工具）——门里因此多出
+  还声明三条真实 MCP loader 行——`mcp-probe-broken`（一条无法 spawn 的命令）、
+  `mcp-probe-ok`（写进临时 home 的最小 stdio MCP 服务器，暴露两个工具）与
+  `mcp-probe-lazy`（`disabled: true`、预置工具缓存的按需行）——门里因此多出
   `state-live-broken`：要求该行 `status: "error"`、`live.state: "failed"`，且 `statusDetail`
   带上 spawn 错误，即使它的 `fiberPhase` 是 `active`（只靠推断会把它当成 `idle`）；以及
   `state-live-connected`：要求 `status: "running"`、`live.state: "connected"`、
   `live.toolCount: 2`、`statusDetail: null`。两行都在 ≈70 ms 内稳定（`live rows settled:
-  yes`）。本检出结果：`PASS (11/11)`。`--expect baseline` 记录 1.2.0 矩阵，只在 `v1.2.0`
-  检出上成立；它把这两个实时探针报告为 `skip`。skip 会单独打印并计数：需要 skip 的运行在
+  yes`）。另有 `state-disclosure`：要求 v1.5 的隐藏足迹（`disclosure.hiddenTools >= 2`、token
+  估算为正），并在已连上的探针行上带出逐行的 `hiddenTools`/`hiddenTokens`；`state-lazy-row`
+  要求按需行读出 `status: "stopped"`、`enabled: false`、`lazy: true`、`hiddenTools >= 1`、
+  `toolCount: 0`，证明配置接线与缓存读取。本检出结果：
+  `PASS (13/13)`。`--expect baseline` 记录 1.2.0 矩阵，只在 `v1.2.0`
+  检出上成立；它把这四个实时/足迹/懒加载探针报告为 `skip`。skip 会单独打印并计数：需要 skip 的运行在
   CI/fallback 要求下仍 exit 0，但它的结论不是权威门——fallback 打印
-  `PASS (9/11, 2 skipped — fallback/no runtime: skips are not evidence)`，`--json` 带
+  `PASS (9/13, 4 skipped — fallback/no runtime: skips are not evidence)`，`--json` 带
   `skipsNotEvidence` / `authority`。没有解包运行时则退回进程内 HTTP 服务器 + 桩围栏
   （`mode: fallback-http`、`platformAuthority: false`），实时探针同样跳过——没有真实 Loader 行
   可供断言。
@@ -792,8 +775,13 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
   影响；但第三方插件若不带 step tool-set 调用 `ctx.tools.definitions(agent)`，可以看到该定义。
 - 补丁写入是对比并交换（compare-and-swap）+ 过期检测与重试，不是跨进程文件锁：并发的
   `plugin_manager`（pnpm）写入会被检测并重试，但不会被协调。
-- `mcp_servers` 不报告有多少目录工具被隐藏或泄漏（推迟：需要 Host 半侧私有的披露状态）；遮蔽
-  失败只在日志里留一条警告。
+- `mcp_servers` 从 1.5 起会报每个服务器的**隐藏足迹**（它贡献了多少目录工具、这些定义可见时要多
+  少），并列出插件有意保持可见的工具及原因；遮蔽失败仍只在日志里留一条警告，真正泄漏进某次
+  prompt 的工具数量没有对外发布。
+- `@deepseek-ai/dsh-mcp-client` 0.2.2 不会把 `execution.taskSupport` 放到已注册的工具定义上，
+  所以 `taskSupport: required` 的工具在**被调用之前无法识别**。它会被当成普通目录工具处理，唯一
+  的信号是桥自己抛出的 `requires task-based execution` 错误。`taskRequired` 的 fail-open 分支
+  只对在定义上暴露该字段的桥有效。
 - 上游 SDK 有一种会把信号发给调用方进程组的行为：`@modelcontextprotocol/client` 的
   `StdioClientTransport._dispose()` 可能在 transport 的 spawn 尚未完成时调用
   `proc.kill("SIGTERM")`，而没有 pid 的 `ChildProcess` 会把它转发给 pid 0。它是既有问题
@@ -820,7 +808,7 @@ bundle 自带 patch 传入 `{}`；如需修改，在 profile 的 `cordis.patch.y
   [docs/architecture.md](docs/architecture.md)。
 - `/dsh-mcp-hub/*` 的信任门来自 Host 的 `connection` 服务，管理半侧也只在该服务存在时激活；若一次
   重组后路由仍挂载而服务暂时消失，它们返回 `503`（fail closed）且不做任何改动。
-- 已装载的工具会在本会话剩余时间里留在工具数组中；卸载会再次改变数组并再付一次缓存未命中。
+- 已装载的工具在卸载前保持原生可见；卸载会改变后续请求中的工具数组。
 - 披露记账是 fail-open 的：作用域或注册不可用时，按「种类 + Agent 对象」只记一条警告并让工具保持
   可见，不会让模型请求失败；prompt 组装时的安全网会重试从未装上的遮蔽。
 - PTC 呈现的 agent（`tools: { mode: ptc }`，如内置 `preset-ptc`）读取同一份受限视图，隐藏与

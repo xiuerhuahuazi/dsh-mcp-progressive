@@ -1,5 +1,7 @@
 # Security contract — management half (1.2.1 → 1.4.0)
 
+> Historical v1.4.0 verification. See the [changelog](../CHANGELOG.md) for subsequent releases.
+
 This note records what the MCP server management half (`lib/management.js`, `client.js`)
 promises, and the raw evidence behind it. It is written from the code and from a real,
 isolated DSH boot; anything not verified is marked as such.

@@ -1,8 +1,7 @@
 # Architecture — where this plugin plugs in (1.4.0)
 
 The seams this plugin uses, why each exists, and the ones it deliberately does not use. Written
-from the 1.4.0 code and the running Host (DSH 0.2.2-rc.3); the memo behind it is
-`dsh-mcp-progressive-review/2026-11-19/arch-1.3-investigation.md`.
+from the 1.4.0 code and the running Host (DSH 0.2.2-rc.3).
 
 ## 1. Disclosure: a per-agent scope restriction
 
@@ -17,7 +16,7 @@ a schema; the seam is the registry view:
   visible, so it is a real native tool without re-deriving the restriction list.
 - The deny list is rebuilt **only when the catalog changes** (a server connects or disconnects),
   never on a load or unload. That keeps the request's tool array stable per session, which is
-  what the cache-cost model in the README depends on: a load changes the step's tool set, not
+  a distinction relevant to request construction: a load changes the step's tool set, not
   the restriction.
 - State is per live Agent, keyed by Agent **object identity** (`WeakMap`), never by `agent.id`;
   `reconcile` is coalesced and idempotent, and the prompt-assembly safety net retries a mask that
